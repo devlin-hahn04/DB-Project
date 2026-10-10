@@ -37,8 +37,6 @@ cd DB-Project
 
 Copy `.env.example` into a new `.env` file.
 
-On Windows PowerShell:
-
 Edit `.env` and provide your local database credentials:
 
 ```dotenv
@@ -77,6 +75,7 @@ It contains:
 - 11 primary keys
 - 8 foreign-key relationships
 - 5 PostGIS geometry columns using SRID 4326
+- 5 GiST spatial indexes
 
 After starting PostgreSQL, execute the schema from the VS Code PowerShell terminal:
 
@@ -97,25 +96,13 @@ Replace `your_username` with the value of `DB_USER` in your `.env` file. If you 
 
 #### Expected Output
 
-```text
-CREATE EXTENSION
-NOTICE:  extension "postgis" already exists, skipping
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-CREATE TABLE
-```
+The initialization should produce:
 
-The output should contain **11 `CREATE TABLE` messages**.
+- 11 `CREATE TABLE` messages
+- 5 `CREATE INDEX` messages
+- A successful PostGIS extension initialization
 
-The PostGIS notice is normal if the extension is already installed.
+A notice indicating that the PostGIS extension already exists is normal.
 
 **Important:** Execute the schema only when initializing a new database. Running the same script again after the tables exist will result in `relation already exists` errors.
 
@@ -146,6 +133,7 @@ Inside the PostgreSQL terminal, execute:
 
 ```sql
 SELECT current_database(), current_user;
+
 SELECT PostGIS_Version();
 ```
 
@@ -164,7 +152,7 @@ List all tables in the `public` schema:
 #### Expected Result
 
 ```text
-                  List of relations
+                   List of relations
  Schema |        Name        | Type  |     Owner
 --------+--------------------+-------+----------------
  public | driver             | table | your_username
@@ -263,7 +251,7 @@ ORDER BY f_table_name, f_geometry_column;
 (5 rows)
 ```
 
-All spatial columns use **SRID 4326 (WGS 84)**.
+All spatial columns use **SRID 4326 (WGS84)**.
 
 The geometry types are:
 
@@ -277,6 +265,65 @@ To exit the PostgreSQL terminal:
 
 ```sql
 \q
+```
+
+## PostGIS Spatial Configuration
+
+The Car Tracking database uses PostgreSQL 17 with the PostGIS extension to support geographic data.
+
+### Spatial Data
+
+All geometry columns use **SRID 4326 (WGS84)**, with coordinates stored in longitude-latitude order.
+
+The database contains five spatial columns:
+
+| Table | Column | Geometry Type |
+|---|---|---|
+| `parking_area` | `geom` | POLYGON |
+| `road_segment` | `geom` | LINESTRING |
+| `location_ping` | `geom` | POINT |
+| `trip` | `start_geom` | POINT |
+| `trip` | `end_geom` | POINT |
+
+### Spatial Indexes
+
+Five GiST spatial indexes are defined in `sql/schema.sql` to support efficient spatial queries.
+
+- `idx_parking_area_geom`
+- `idx_road_segment_geom`
+- `idx_location_ping_geom`
+- `idx_trip_start_geom`
+- `idx_trip_end_geom`
+
+These indexes are created automatically when initializing a fresh database using `schema.sql`.
+
+For an existing database, execute only the new `CREATE INDEX` statements rather than rerunning the entire schema.
+
+#### Verify Spatial Indexes
+
+Execute the following query inside PostgreSQL:
+
+```sql
+SELECT
+    tablename,
+    indexname
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND indexdef ILIKE '%USING gist%'
+ORDER BY tablename, indexname;
+```
+
+#### Expected Result
+
+```text
+   tablename   |       indexname
+---------------+------------------------
+ location_ping | idx_location_ping_geom
+ parking_area  | idx_parking_area_geom
+ road_segment  | idx_road_segment_geom
+ trip          | idx_trip_end_geom
+ trip          | idx_trip_start_geom
+(5 rows)
 ```
 
 ## Useful Docker Commands
@@ -317,6 +364,6 @@ These commands are executed inside the PostgreSQL terminal (`psql`).
 - All 11 project tables use `BIGINT` primary keys.
 - The database includes 8 foreign-key relationships.
 - Spatial columns use PostGIS `GEOMETRY` types with SRID 4326.
-- The schema is compatible with PostgreSQL 17 and PostGIS.
+- Five GiST indexes support spatial queries.
 - The `sql/schema.sql` file is version-controlled so each developer can initialize the same database structure locally.
 - Database contents and Docker volumes are not shared through GitHub. Each developer maintains their own local database.

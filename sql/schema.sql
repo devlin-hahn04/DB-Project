@@ -126,3 +126,19 @@ CREATE TABLE trip (
   FOREIGN KEY (vehicle_id)
     REFERENCES vehicle(vehicle_id)
 );
+
+-- PostGIS Spatial Indexes 
+CREATE INDEX idx_parking_area_geom
+ON parking_area USING GIST (geom);
+
+CREATE INDEX idx_road_segment_geom
+ON road_segment USING GIST (geom);
+
+CREATE INDEX idx_location_ping_geom
+ON location_ping USING GIST (geom);
+
+CREATE INDEX idx_trip_start_geom
+ON trip USING GIST (start_geom);
+
+CREATE INDEX idx_trip_end_geom
+ON trip USING GIST (end_geom);
