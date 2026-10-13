@@ -267,6 +267,93 @@ To exit the PostgreSQL terminal:
 \q
 ```
 
+## ETL Pipeline
+
+`ETL/main.py` loads the 11 official Parquet datasets into the schema exactly as provided, with no ORM. It uses `pyarrow` to read the files and `psycopg` with PostgreSQL `COPY` to insert the rows.
+
+What a run does:
+
+1. Reads every Parquet file. It checks that each file's columns match the target table's columns and types before touching the database.
+2. Connects and checks that all 11 tables exist. If they don't, run `sql/schema.sql` first (step 4 above).
+3. Truncates the 11 tables and loads them in foreign-key order: `vehicle_kind`, `fuel_type`, `vehicle_status`, `vehicle_type`, `parking_area`, `driver`, `road_segment`, `vehicle`, `location_ping`, `vehicle_assignment`, `trip`.
+4. Checks that each table's row count matches its Parquet file.
+
+Everything runs in a single transaction. If any step fails, nothing is committed. Rerunning the ETL always leaves the tables matching the Parquet files exactly.
+
+Geometry columns arrive as hex EWKB that already carries SRID 4326, so PostGIS stores them as-is.
+
+### 1. Add the Data
+
+Copy the 11 `.parquet` files from Moodle (Project/Project data) into the `data/` folder. Git does not track that folder.
+
+```text
+data/
+├── driver.parquet
+├── fuel_type.parquet
+├── location_ping.parquet
+├── parking_area.parquet
+├── road_segment.parquet
+├── trip.parquet
+├── vehicle.parquet
+├── vehicle_assignment.parquet
+├── vehicle_kind.parquet
+├── vehicle_status.parquet
+└── vehicle_type.parquet
+```
+
+To read the files from another folder, set `DATA_DIR` in `.env`.
+
+### 2. Run the ETL (Docker)
+
+With the database running and the schema created:
+
+```powershell
+docker compose run --rm etl
+```
+
+This builds a small Python container on the first run and starts PostgreSQL if needed. It then runs the ETL against the local `car-tracking-db` database.
+
+After code or dependency changes, rebuild with `docker compose build etl`.
+
+### 2b. Run the ETL (Native Python, Optional)
+
+Some Windows machines with Smart App Control block `pyarrow`, so use Docker on those. Elsewhere:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python ETL/main.py
+```
+
+The script reads its settings from environment variables, not from `.env`. Set `DB_USER`, `DB_PASSWORD` and `DB_NAME` in the shell first, for example `$env:DB_USER="..."`. `DB_HOST` defaults to `localhost` and `DB_PORT` to `5432`.
+
+### Expected Output
+
+```text
+... INFO    Read vehicle_kind               5 rows
+...
+... INFO    Loaded trip                     300 rows in 0.05s
+... INFO    Row counts verified for all 11 tables
+... INFO    ETL finished successfully
+```
+
+| Table | Rows |
+|---|---|
+| `vehicle_kind` | 5 |
+| `fuel_type` | 2 |
+| `vehicle_status` | 2 |
+| `vehicle_type` | 8 |
+| `parking_area` | 224 |
+| `driver` | 12 |
+| `road_segment` | 4086 |
+| `vehicle` | 30 |
+| `location_ping` | 28041 |
+| `vehicle_assignment` | 42 |
+| `trip` | 300 |
+
+On failure, the ETL logs the reason and exits with a non-zero code without changing the database. Examples: a missing file, a column mismatch, a missing table, or a connection error.
+
 ## PostGIS Spatial Configuration
 
 The Car Tracking database uses PostgreSQL 17 with the PostGIS extension to support geographic data.
