@@ -1,11 +1,14 @@
-"""Car Tracking Phase I ETL.
+"""
+Car Tracking Phase I ETL.
 
-Reads the 11 official Parquet datasets and loads them, unmodified, into the
-PostgreSQL + PostGIS schema defined in sql/schema.sql. No ORM is used: rows are
-streamed with PostgreSQL COPY through psycopg.
+Reads the 11 official Parquet datasets and loads them into
+PostgreSQL + PostGIS using parameterized INSERT statements.
 
-The whole load runs in a single transaction: every table is truncated and
-reloaded, so a failure anywhere rolls the database back to its previous state.
+EWKB geometry values are explicitly converted using
+ST_GeomFromEWKB(decode(%s, 'hex')).
+
+The entire load runs in one transaction. If any insertion
+fails, the transaction is rolled back.
 """
 
 import logging
@@ -25,8 +28,8 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 
 # Target tables in foreign-key load order (parents before children).
 # Columns are listed in sql/schema.sql order with their PostgreSQL types.
-# Geometry values arrive as hex EWKB strings that already carry SRID 4326,
-# which PostGIS parses directly, so they are loaded as-is.
+# Geometry values arrive as EWKB hexadecimal strings.
+# They are explicitly converted using ST_GeomFromEWKB().
 TABLES = [
     ("vehicle_kind", [
         ("name", "text"),
@@ -206,16 +209,39 @@ def check_tables_exist(cur):
         )
 
 
+
 def load_table(cur, table_name, columns, table):
     names = [name for name, _ in columns]
-    copy_stmt = sql.SQL("COPY {} ({}) FROM STDIN").format(
+
+    # Read the Parquet values in the schema's column order.
+    values = [column_values(table, name) for name in names]
+
+    # Build SQL placeholders based on each column's type.
+    placeholders = []
+
+    for name, pg_type in columns:
+        if pg_type == "geometry":
+            # Explicitly convert EWKB hex into PostGIS geometry.
+            placeholders.append(
+                sql.SQL("ST_GeomFromEWKB(decode(%s, 'hex'))")
+            )
+        else:
+            # Regular PostgreSQL parameter.
+            placeholders.append(sql.SQL("%s"))
+
+    # Construct a parameterized INSERT statement.
+    insert_stmt = sql.SQL(
+        "INSERT INTO {} ({}) VALUES ({})"
+    ).format(
         sql.Identifier(table_name),
         sql.SQL(", ").join(map(sql.Identifier, names)),
+        sql.SQL(", ").join(placeholders),
     )
-    values = [column_values(table, name) for name in names]
-    with cur.copy(copy_stmt) as copy:
-        for row in zip(*values):
-            copy.write_row(row)
+
+    # Insert each row using the correct parameter values.
+    for row in zip(*values):
+        cur.execute(insert_stmt, row)
+
 
 
 def verify_counts(cur, expected_counts):
