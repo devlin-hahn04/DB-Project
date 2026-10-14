@@ -267,6 +267,225 @@ To exit the PostgreSQL terminal:
 \q
 ```
 
+## ETL Pipeline
+
+`ETL/main.py` loads the 11 official Parquet datasets into the schema exactly as provided, with no ORM. It uses `pyarrow` to read the files and `psycopg` to execute parameterized PostgreSQL `INSERT` statements. Geometry values are explicitly converted into PostGIS geometries using `ST_GeomFromEWKB(decode(%s, 'hex'))`.
+
+What a run does:
+
+1. Reads every Parquet file. It checks that each file's columns match the target table's columns and types before touching the database.
+2. Connects and checks that all 11 tables exist. If they don't, run `sql/schema.sql` first (step 4 above).
+3. Truncates the 11 tables and loads them in foreign-key order: `vehicle_kind`, `fuel_type`, `vehicle_status`, `vehicle_type`, `parking_area`, `driver`, `road_segment`, `vehicle`, `location_ping`, `vehicle_assignment`, `trip`.
+4. Checks that each table's row count matches its Parquet file.
+
+Everything runs in a single transaction. If any step fails, nothing is committed. Rerunning the ETL always leaves the tables matching the Parquet files exactly.
+
+Geometry columns are provided as hexadecimal EWKB strings containing SRID 4326. During insertion, these values are explicitly converted into PostGIS geometry objects using `ST_GeomFromEWKB(decode(%s, 'hex'))`, following the professor's recommended SQL approach. The original spatial data and coordinate reference system are preserved.
+
+### 1. Add the Data
+
+Copy the 11 `.parquet` files from Moodle (Project/Project data) into the `data/` folder. Git does not track that folder.
+
+```text
+data/
+├── driver.parquet
+├── fuel_type.parquet
+├── location_ping.parquet
+├── parking_area.parquet
+├── road_segment.parquet
+├── trip.parquet
+├── vehicle.parquet
+├── vehicle_assignment.parquet
+├── vehicle_kind.parquet
+├── vehicle_status.parquet
+└── vehicle_type.parquet
+```
+
+To read the files from another folder, set `DATA_DIR` in `.env`.
+
+### 2. Run the ETL (Docker)
+
+With the database running and the schema created:
+
+```powershell
+docker compose run --rm etl
+```
+
+This builds a small Python container on the first run and starts PostgreSQL if needed. It then runs the ETL against the local `car-tracking-db` database.
+
+After code or dependency changes, rebuild with `docker compose build etl`.
+
+### 2b. Run the ETL (Native Python, Optional)
+
+Some Windows machines with Smart App Control block `pyarrow`, so use Docker on those. Elsewhere:
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+python ETL/main.py
+```
+
+The script reads its settings from environment variables, not from `.env`. Set `DB_USER`, `DB_PASSWORD` and `DB_NAME` in the shell first, for example `$env:DB_USER="..."`. `DB_HOST` defaults to `localhost` and `DB_PORT` to `5432`.
+
+### Expected Output
+
+```text
+... INFO    Read vehicle_kind               5 rows
+...
+... INFO    Loaded trip                     300 rows in 0.05s
+... INFO    Row counts verified for all 11 tables
+... INFO    ETL finished successfully
+```
+
+| Table | Rows |
+|---|---|
+| `vehicle_kind` | 5 |
+| `fuel_type` | 2 |
+| `vehicle_status` | 2 |
+| `vehicle_type` | 8 |
+| `parking_area` | 224 |
+| `driver` | 12 |
+| `road_segment` | 4086 |
+| `vehicle` | 30 |
+| `location_ping` | 28041 |
+| `vehicle_assignment` | 42 |
+| `trip` | 300 |
+
+On failure, the ETL logs the reason and exits with a non-zero code without changing the database. Examples: a missing file, a column mismatch, a missing table, or a connection error.
+
+## Data Validation
+
+Validation runs at two levels, and neither one modifies the data:
+
+1. **`sql/validation.sql`** checks the database itself: the schema, row counts, keys, NULLs, PostGIS geometries and a set of representative queries. Run it against the local container or against Render.
+2. **`ETL/compare_parquet_csv.py`** compares every exported row against the original Parquet files, value by value.
+
+### Filtered or Rejected Records
+
+None. The ETL loads all 32,752 records exactly as provided, with no cleaning, filtering, deduplication or value changes, as the project specification requires. If any row fails to insert, the whole load rolls back and the ETL exits with an error, so the database never holds a partial load. Checks marked `INFO` below only report on the data; nothing they flag is ever corrected.
+
+### 1. Database Validation (SQL)
+
+With the ETL loaded, run from the project root:
+
+```powershell
+Get-Content .\sql\validation.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 -U naturaljoiners -d cartracking
+```
+
+To validate the Render database, pass its external connection URL instead of `-U`/`-d`:
+
+```powershell
+Get-Content .\sql\validation.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 "postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+```
+
+The script is read-only. It creates only session-scoped `TEMP` tables, which are dropped when it finishes.
+
+| Section | What it checks | Status |
+|---|---|---|
+| 1. Schema | All 11 tables and 54 columns exist with the names and data types from the table diagram, including geometry type and SRID. Unexpected columns are also flagged. | PASS/FAIL |
+| 2. Row counts | Each table matches its Parquet file's row count. | PASS/FAIL |
+| 3. Primary keys | Each table has its primary key on the expected column, with no duplicate or NULL ids. | PASS/FAIL |
+| 4. Foreign keys | All 8 foreign-key constraints exist and no row references a missing parent. | PASS/FAIL |
+| 5. NULLs | Per-column NULL counts match the source. The only NULLs are `location_ping.heading_deg` (300) and `vehicle_assignment.assigned_to` (30, open-ended assignments). | PASS/FAIL |
+| 6. PostGIS | `geometry_columns` registration, plus every stored value's SRID (4326) and geometry type. | PASS/FAIL |
+| 6. PostGIS | Coordinates fall inside a Puerto Rico bounding box (catches swapped longitude/latitude), and geometries are valid and non-empty. | INFO |
+| 7. Sanity | Trips ending before they start, negative distances or speeds, headings outside 0–360, assignments ending before they start. | INFO |
+| 8. Representative queries | Relational joins (vehicle details, driver assignment history, trips per vehicle) and spatial queries (`ST_Within`, nearest road with `<->`, `ST_DWithin`). Shown for review. | — |
+
+#### Expected Result
+
+```text
+========================= SUMMARY ==========================
+ passed | failed | info | overall
+--------+--------+------+---------
+    167 |      0 |   17 | PASS
+```
+
+Every `INFO` check reports 0 problems: all coordinates are inside Puerto Rico in longitude/latitude order, and all geometries are valid. The only non-zero `INFO` rows are the expected NULLs (300 pings without a heading and 30 open-ended assignments).
+
+Any `FAIL` row names the table and column and shows the actual and expected values.
+
+### 2. Parquet vs. PostgreSQL Comparison
+
+To verify data integrity, the imported PostgreSQL records can be cross-referenced against the original Parquet datasets using `ETL/compare_parquet_csv.py`.
+
+The script compares all 11 datasets, including record counts, column values, timestamps, NULL values, and EWKB geometry representations.
+
+**Step 1 — Run the ETL**
+
+Ensure the database is running, the schema exists, and all 11 Parquet files are inside `data/`.
+
+```powershell
+docker compose build etl
+docker compose run --rm etl
+```
+
+**Step 2 — Export PostgreSQL tables to CSV**
+
+Run the following commands from the project root in PowerShell:
+
+```powershell
+$tables = @(
+    "driver",
+    "fuel_type",
+    "location_ping",
+    "parking_area",
+    "road_segment",
+    "trip",
+    "vehicle",
+    "vehicle_assignment",
+    "vehicle_kind",
+    "vehicle_status",
+    "vehicle_type"
+)
+
+New-Item -ItemType Directory -Force -Path .\db_exports | Out-Null
+
+foreach ($table in $tables) {
+    docker exec car-tracking-db psql `
+        -U naturaljoiners `
+        -d cartracking `
+        -c "\copy (SELECT * FROM public.$table) TO '/tmp/$table.csv' WITH (FORMAT csv, HEADER true)"
+
+    docker cp "car-tracking-db:/tmp/$table.csv" ".\db_exports\$table.csv"
+}
+```
+
+The CSV files will be saved in `db_exports/`. Exporting inside Docker avoids Windows PowerShell character-encoding issues.
+
+**Step 3 — Run the comparison script**
+
+```powershell
+docker compose run --rm `
+  -v "${PWD}/db_exports:/exports:ro" `
+  etl python ETL/compare_parquet_csv.py
+```
+
+The script reads the original Parquet files from `/data` and the exported PostgreSQL CSV files from `/exports`.
+
+**Expected Results**
+
+```text
+driver               PASS parquet=    12 csv=    12 differences=0
+fuel_type            PASS parquet=     2 csv=     2 differences=0
+location_ping        PASS parquet= 28041 csv= 28041 differences=0
+parking_area         PASS parquet=   224 csv=   224 differences=0
+road_segment         PASS parquet=  4086 csv=  4086 differences=0
+trip                 PASS parquet=   300 csv=   300 differences=0
+vehicle              PASS parquet=    30 csv=    30 differences=0
+vehicle_assignment   PASS parquet=    42 csv=    42 differences=0
+vehicle_kind         PASS parquet=     5 csv=     5 differences=0
+vehicle_status       PASS parquet=     2 csv=     2 differences=0
+vehicle_type         PASS parquet=     8 csv=     8 differences=0
+
+OVERALL: PASS — 0 differences
+```
+
+**Validation Summary:** All 32,752 records across 11 tables were successfully verified, with zero differences between the original Parquet files and PostgreSQL exports. Original geometry values and NULL values were preserved.
+
+The `db_exports/` directory contains generated test artifacts and is ignored by Git.
+
 ## PostGIS Spatial Configuration
 
 The Car Tracking database uses PostgreSQL 17 with the PostGIS extension to support geographic data.
