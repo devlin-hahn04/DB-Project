@@ -354,7 +354,59 @@ The script reads its settings from environment variables, not from `.env`. Set `
 
 On failure, the ETL logs the reason and exits with a non-zero code without changing the database. Examples: a missing file, a column mismatch, a missing table, or a connection error.
 
-### ETL Data Validation (Parquet vs. PostgreSQL)
+## Data Validation
+
+Validation runs at two levels, and neither one modifies the data:
+
+1. **`sql/validation.sql`** checks the database itself: the schema, row counts, keys, NULLs, PostGIS geometries and a set of representative queries. Run it against the local container or against Render.
+2. **`ETL/compare_parquet_csv.py`** compares every exported row against the original Parquet files, value by value.
+
+### Filtered or Rejected Records
+
+None. The ETL loads all 32,752 records exactly as provided, with no cleaning, filtering, deduplication or value changes, as the project specification requires. If any row fails to insert, the whole load rolls back and the ETL exits with an error, so the database never holds a partial load. Checks marked `INFO` below only report on the data; nothing they flag is ever corrected.
+
+### 1. Database Validation (SQL)
+
+With the ETL loaded, run from the project root:
+
+```powershell
+Get-Content .\sql\validation.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 -U naturaljoiners -d cartracking
+```
+
+To validate the Render database, pass its external connection URL instead of `-U`/`-d`:
+
+```powershell
+Get-Content .\sql\validation.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 "postgresql://USER:PASSWORD@HOST/DBNAME?sslmode=require"
+```
+
+The script is read-only. It creates only session-scoped `TEMP` tables, which are dropped when it finishes.
+
+| Section | What it checks | Status |
+|---|---|---|
+| 1. Schema | All 11 tables and 54 columns exist with the names and data types from the table diagram, including geometry type and SRID. Unexpected columns are also flagged. | PASS/FAIL |
+| 2. Row counts | Each table matches its Parquet file's row count. | PASS/FAIL |
+| 3. Primary keys | Each table has its primary key on the expected column, with no duplicate or NULL ids. | PASS/FAIL |
+| 4. Foreign keys | All 8 foreign-key constraints exist and no row references a missing parent. | PASS/FAIL |
+| 5. NULLs | Per-column NULL counts match the source. The only NULLs are `location_ping.heading_deg` (300) and `vehicle_assignment.assigned_to` (30, open-ended assignments). | PASS/FAIL |
+| 6. PostGIS | `geometry_columns` registration, plus every stored value's SRID (4326) and geometry type. | PASS/FAIL |
+| 6. PostGIS | Coordinates fall inside a Puerto Rico bounding box (catches swapped longitude/latitude), and geometries are valid and non-empty. | INFO |
+| 7. Sanity | Trips ending before they start, negative distances or speeds, headings outside 0–360, assignments ending before they start. | INFO |
+| 8. Representative queries | Relational joins (vehicle details, driver assignment history, trips per vehicle) and spatial queries (`ST_Within`, nearest road with `<->`, `ST_DWithin`). Shown for review. | — |
+
+#### Expected Result
+
+```text
+========================= SUMMARY ==========================
+ passed | failed | info | overall
+--------+--------+------+---------
+    167 |      0 |   17 | PASS
+```
+
+Every `INFO` check reports 0 problems: all coordinates are inside Puerto Rico in longitude/latitude order, and all geometries are valid. The only non-zero `INFO` rows are the expected NULLs (300 pings without a heading and 30 open-ended assignments).
+
+Any `FAIL` row names the table and column and shows the actual and expected values.
+
+### 2. Parquet vs. PostgreSQL Comparison
 
 To verify data integrity, the imported PostgreSQL records can be cross-referenced against the original Parquet datasets using `ETL/compare_parquet_csv.py`.
 
@@ -432,7 +484,7 @@ OVERALL: PASS — 0 differences
 
 **Validation Summary:** All 32,752 records across 11 tables were successfully verified, with zero differences between the original Parquet files and PostgreSQL exports. Original geometry values and NULL values were preserved.
 
-The `db_exports/` directory contains generated test artifacts and does not need to be committed to Git.
+The `db_exports/` directory contains generated test artifacts and is ignored by Git.
 
 ## PostGIS Spatial Configuration
 
