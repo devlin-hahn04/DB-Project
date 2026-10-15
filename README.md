@@ -6,16 +6,35 @@ A PostgreSQL 17 database project using PostGIS for geospatial data storage and P
 
 ```text
 DB-Project/
-├── data/                 # Parquet datasets (not tracked by Git)
+├── data/                         # Official Parquet datasets (not tracked by Git)
+│   ├── driver.parquet
+│   ├── fuel_type.parquet
+│   ├── location_ping.parquet
+│   ├── parking_area.parquet
+│   ├── road_segment.parquet
+│   ├── trip.parquet
+│   ├── vehicle_assignment.parquet
+│   ├── vehicle_kind.parquet
+│   ├── vehicle_status.parquet
+│   ├── vehicle_type.parquet
+│   └── vehicle.parquet
 ├── ETL/
-│   └── main.py           # Python ETL pipeline
+│   ├── compare_parquet_csv.py    # Compare Parquet data against PostgreSQL CSV exports
+│   ├── Dockerfile                # Docker image for the ETL pipeline
+│   └── main.py                   # Python ETL pipeline
 ├── sql/
-│   └── schema.sql        # PostgreSQL relational database schema
-├── .env.example          # Example environment variables
-├── .gitignore
-├── docker-compose.yml
-├── requirements.txt
-└── README.md
+│   ├── schema.sql                # PostgreSQL relational database schema
+│   └── validation.sql            # Database integrity and spatial validation tests
+├── .dockerignore                 # Files excluded from Docker builds
+├── .env                          # Local credentials (not tracked by Git)
+├── .env.example                  # Example environment variables
+├── .gitignore                    # Files excluded from Git
+├── docker-compose.yml            # PostgreSQL and ETL service configuration
+├── README.md                     # Project setup and usage documentation
+├── RENDER_DEPLOYMENT_REPORT.md   # Render deployment and verification report
+├── REPRODUCIBILITY_TEST.md       # Independent ETL reproducibility test report
+├── requirements.txt              # Python dependencies
+└── verify_parquet_render.py      # Direct Parquet vs. Render data verification
 ```
 
 ## Prerequisites
@@ -586,3 +605,274 @@ These commands are executed inside the PostgreSQL terminal (`psql`).
 - Five GiST indexes support spatial queries.
 - The `sql/schema.sql` file is version-controlled so each developer can initialize the same database structure locally.
 - Database contents and Docker volumes are not shared through GitHub. Each developer maintains their own local database.
+## Reproducible ETL and Clean Database Initialization
+
+This issue was independently tested by a second team member to confirm that the database can be initialized from scratch and populated from the official Parquet datasets without relying on an existing, preloaded database. The testing results are recorded in `REPRODUCIBILITY_TEST.md`.
+
+### 1. Create a Separate Clean Test Database
+
+With the local Docker PostgreSQL container running, create a new database instead of using the existing `cartracking` database:
+
+```powershell
+docker compose up -d postgres
+
+docker exec car-tracking-db psql -U naturaljoiners -d postgres -c "CREATE DATABASE cartracking_fresh_test;"
+```
+
+The fresh database starts without the application tables or imported project records. If your local database username is different, replace `naturaljoiners` in these commands with your configured `DB_USER`.
+
+### 2. Initialize the Schema from Scratch
+
+From the project root in VS Code PowerShell:
+
+```powershell
+Get-Content .\sql\schema.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 -1 -U naturaljoiners -d cartracking_fresh_test
+```
+
+This creates the 11 application tables, primary-key and foreign-key constraints, PostGIS geometry columns, and five GiST spatial indexes. It also enables the PostGIS extension. Using `-1` makes schema initialization transactional.
+
+### 3. Load All Parquet Datasets Using the ETL
+
+Place all 11 official `.parquet` files in `data/`, then execute:
+
+```powershell
+docker compose run --rm -e DB_NAME=cartracking_fresh_test etl
+```
+
+The Docker ETL container reads the official Parquet files, connects to the new database, inserts records in the proper foreign-key order, and checks the final counts. The clean initialization test successfully loaded **32,752 records across 11 application tables**, with no source records filtered or rejected.
+
+### 4. Test Repeatability
+
+Run the same ETL command a second time:
+
+```powershell
+docker compose run --rm -e DB_NAME=cartracking_fresh_test etl
+```
+
+**Observed result:** The second run completed successfully with the same row counts and no duplicated records. The ETL truncates and reloads the application tables in one transaction, so repeat runs recreate the expected contents rather than adding duplicate records.
+
+### 5. Test Failures Without Altering Existing Records
+
+The secondary testing also included deliberately invalid configurations:
+
+**Missing required database username:**
+
+```powershell
+docker compose run --rm -e DB_NAME=cartracking_fresh_test -e DB_USER= etl
+```
+
+**Missing Parquet data directory:**
+
+```powershell
+docker compose run --rm -e DB_NAME=cartracking_fresh_test -e DATA_DIR=/missing-data etl
+```
+
+**Observed result:** Both tests returned clear errors. The ETL aborted without committing changes, and the previously loaded `location_ping` table retained all **28,041 rows**. These tests confirmed that failures are handled without leaving a partially reloaded database.
+
+### 6. Validate the Fresh Database
+
+Run the read-only validation suite against the fresh database:
+
+```powershell
+Get-Content .\sql\validation.sql -Raw | docker exec -i car-tracking-db psql -X -v ON_ERROR_STOP=1 -U naturaljoiners -d cartracking_fresh_test
+```
+
+**Actual test summary:**
+
+```text
+========================= SUMMARY ==========================
+ passed | failed | info | overall
+--------+--------+------+---------
+    167 |      0 |   17 | PASS
+```
+
+Validation covered table structures, expected record counts, primary keys, foreign keys, NULL values, PostGIS geometry types and SRIDs, and representative relational and spatial queries. No validation failures were reported.
+
+### 7. Reproducibility Result
+
+The independent tester confirmed that the schema and ETL could be used to build a complete database from a clean starting point, repeat the import without duplicating records, and safely stop on invalid configuration or missing input files. The detailed procedure and evidence are documented in `REPRODUCIBILITY_TEST.md`.
+
+## Deploy PostgreSQL Database to Render
+
+The project database was deployed to Render so that a PostgreSQL 17/PostGIS instance would be available remotely for grading. The setup, issues encountered, test results, and verification evidence are documented in `RENDER_DEPLOYMENT_REPORT.md`.
+
+### 1. Render Database Specifications
+
+| Setting | Render configuration |
+|---|---|
+| Provider | Render managed PostgreSQL |
+| Service name | `car-tracking-db` |
+| Region | Virginia (US East) |
+| Plan | Free |
+| PostgreSQL version | `17.11` |
+| PostGIS available version | `3.6.2` |
+| Enabled PostGIS version | `3.6` |
+| Database name | `cartracking_nchv` |
+| External hostname | `dpg-db87op4s728c738ghs30-a.virginia-postgres.render.com` |
+| Port | `5432` |
+| External database username | `cartrackingdb_2rg8_user` |
+| Password | `dvAXpDOZkDMOwD7o1K4NRY54C43jNWrP` |
+| SSL mode | `require` |
+| Verified encrypted connection | TLS 1.3 |
+| Project application tables | 11 |
+| PostGIS system table | `spatial_ref_sys` |
+| Geometry SRID | `4326` (WGS84) |
+| Loaded project records | 32,752 |
+
+**Render DB username:** cartrackingdb_2rg8_user
+**Render DB Password:** dvAXpDOZkDMOwD7o1K4NRY54C43jNWrP
+
+Render is a separate hosted database; its username, database name, hostname, and password are not the same as the local Docker settings. The Render database has a PostgreSQL role configuration under which the authenticated `session_user` is `cartrackingdb_2rg8_user` and `current_user` is `naturaljoiners`.
+
+### 2. Connect to Render from PowerShell
+
+From the project root, use a temporary PostgreSQL client container. It asks for the password without displaying it:
+
+```powershell
+docker run --rm -it `
+  -v "${PWD}\sql:/sql:ro" `
+  postgres:17 psql `
+  "host=dpg-db87op4s728c738ghs30-a.virginia-postgres.render.com port=5432 dbname=cartracking_nchv user=cartrackingdb_2rg8_user sslmode=require" `
+  -W -X -v ON_ERROR_STOP=1
+```
+
+The `sql/` folder is mounted read-only inside the client at `/sql`. Inside `psql`, verify the connection and database configuration:
+
+```sql
+\pset pager off
+\conninfo
+SELECT session_user, current_user, current_database();
+SELECT version();
+SELECT PostGIS_Version();
+\dt public.*
+```
+
+**Observed result:** Remote login succeeded using SSL/TLS, PostgreSQL 17.11 was available, the PostGIS extension was working, and the database contained 11 project tables plus the PostGIS `spatial_ref_sys` table.
+
+### 3. Create the Hosted Database Schema
+
+When initializing a brand-new Render database, connect using the command above and run:
+
+```sql
+BEGIN;
+\i /sql/schema.sql
+COMMIT;
+```
+
+**Important:** This schema step was already completed on the deployed Render database. Do not rerun `schema.sql` against the existing populated database because its tables already exist.
+
+The deployed schema includes all 11 project tables, eight foreign-key relationships, five SRID 4326 geometry columns, and five GiST spatial indexes.
+
+### 4. Import the Official Parquet Files to Render
+
+First build the ETL Docker image if it is not already available:
+
+```powershell
+docker compose build etl
+```
+
+Set the current authorized Render password for this PowerShell session without printing it:
+
+```powershell
+$securePassword = Read-Host "Render database password" -AsSecureString
+$env:DB_PASSWORD = [System.Net.NetworkCredential]::new("", $securePassword).Password
+```
+
+Then run the ETL with the Render connection variables explicitly specified:
+
+```powershell
+docker run --rm `
+  -v "${PWD}\data:/data:ro" `
+  -e DB_HOST=dpg-db87op4s728c738ghs30-a.virginia-postgres.render.com `
+  -e DB_PORT=5432 `
+  -e DB_USER=cartrackingdb_2rg8_user `
+  -e DB_PASSWORD `
+  -e DB_NAME=cartracking_nchv `
+  -e DB_SSLMODE=require `
+  -e DATA_DIR=/data `
+  db-project-etl:latest
+```
+
+**Observed result:** The ETL successfully loaded **32,752 records across all 11 tables** and verified the expected row counts. The one-time remote import took approximately **28 minutes**, much longer than local Docker loading because records were inserted over an external network connection. Do not rerun the hosted ETL unless a refresh is actually required; it truncates and reloads the hosted tables.
+
+Remove the PowerShell password variable after use:
+
+```powershell
+Remove-Item Env:DB_PASSWORD -ErrorAction SilentlyContinue
+```
+
+### 5. Validate the Hosted Database
+
+Reconnect to Render using the interactive `psql` command in Step 2 and execute:
+
+```sql
+\i /sql/validation.sql
+```
+
+**Actual Render validation summary:**
+
+```text
+========================= SUMMARY ==========================
+ passed | failed | info | overall
+--------+--------+------+---------
+    167 |      0 |   17 | PASS
+```
+
+All schema, constraint, row-count, and geometry checks passed. The remote tests also confirmed that PostGIS spatial queries such as `ST_Within`, `ST_DWithin`, and nearest-road ordering with `<->` executed successfully.
+
+### 6. Compare the Hosted Data Directly with Parquet Sources
+
+The independent script `verify_parquet_render.py` performs a read-only, source-to-database comparison. It connects to Render, reads each of the 11 original Parquet datasets, and compares the stored records by primary key and values, including the relevant geographic information.
+
+With the authorized Render password temporarily set as `DB_PASSWORD`, run from the project root:
+
+```powershell
+docker run --rm `
+  -v "${PWD}\data:/data:ro" `
+  -v "${PWD}\verify_parquet_render.py:/verify.py:ro" `
+  -e DB_HOST=dpg-db87op4s728c738ghs30-a.virginia-postgres.render.com `
+  -e DB_PORT=5432 `
+  -e DB_USER=cartrackingdb_2rg8_user `
+  -e DB_PASSWORD `
+  -e DB_NAME=cartracking_nchv `
+  -e DB_SSLMODE=require `
+  -e DATA_DIR=/data `
+  db-project-etl:latest python /verify.py
+```
+
+**Actual verification result:**
+
+```text
+OVERALL: PASS — 11/11 tables have identical per-key values
+```
+
+| Verification | Result |
+|---|---|
+| Source Parquet datasets | 11 |
+| Render application tables | 11 |
+| Source records compared | 32,752 |
+| Data discrepancies | 0 |
+| SQL validation | 167 PASS / 0 FAIL / 17 INFO |
+| PostGIS spatial queries | PASS |
+
+This establishes that the Render-hosted records matched the official Parquet data in the values checked, not just in their total row counts.
+
+After verification, clear the password variable:
+
+```powershell
+Remove-Item Env:DB_PASSWORD -ErrorAction SilentlyContinue
+```
+
+### 7. Render Deployment Problems and Resolutions
+
+| Issue encountered | Resolution |
+|---|---|
+| Incorrect placeholder hostname during connection testing | Used Render's actual external database hostname. |
+| Difficulty passing a password when piping SQL into a remote client | Used an interactive Docker `psql` client with `-W` and mounted `sql/` read-only. |
+| Authentication error while configuring the remote ETL | Corrected the password passed through PowerShell and retested the connection. |
+| `psql` output appeared to pause | Disabled the output pager with `\pset pager off`. |
+| ETL inserts were significantly slower on Render than locally | Allowed the complete remote import to finish and verified all expected records afterward. |
+
+### 8. Deployment Result and Report
+
+The cloud-hosted Deployment delivered a remotely accessible PostgreSQL 17/PostGIS database on Render containing **all 32,752 official project records**. The remote schema, relationships, geometry data, spatial queries, and Parquet-to-database record values were independently verified. See `RENDER_DEPLOYMENT_REPORT.md` for the deployment steps, evidence, and full results. Local Docker databases remain separate and can be used for testing without affecting the Render instance.
