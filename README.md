@@ -18,7 +18,7 @@ The project uses PostgreSQL and PostGIS to store structured and spatial data. It
 
 | Phase | Documentation |
 |---|---|
-| **Phase 1** | [Phase 1 — Setup, ETL, Validation, and Render Deployment](phase1/README.md) |
+| **Phase 1** | [Phase 1 – Setup, ETL, Validation, and Render Deployment](documentation/phase1/README.md) |
 | **Phase 2** | Documentation pending |
 | **Phase 3** | Documentation pending |
 
