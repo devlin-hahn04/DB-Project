@@ -4,3 +4,13 @@ __pycache__/
 *.pyc
 data/
 db_exports/
+
+# Local testing and validation documentation
+RENDER_DEPLOYMENT_REPORT.md
+REPRODUCIBILITY_TEST.md
+sql/validation.sql
+ETL/compare_parquet_csv.py
+validate.py
+
+envs/.env.local
+envs/.env.render
