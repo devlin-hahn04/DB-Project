@@ -1,2 +1,7 @@
 pyarrow==19.0.1
 psycopg[binary]==3.2.9
+
+pandas
+pyarrow
+psycopg[binary]
+python-dotenv
