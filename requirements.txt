@@ -1,7 +1,10 @@
+# Phase 1 - ETL and Database
+pandas
 pyarrow==19.0.1
 psycopg[binary]==3.2.9
-
-pandas
-pyarrow
-psycopg[binary]
 python-dotenv
+
+# Phase 2 - REST API Backend
+fastapi
+uvicorn[standard]
+psycopg2-binary
