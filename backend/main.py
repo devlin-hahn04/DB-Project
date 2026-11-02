@@ -5,6 +5,7 @@ from fastapi import (
     HTTPException,
     Query,
     Request,
+    Response,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -27,6 +28,16 @@ from backend.models.drivers import (
     DriverDeleteResponse,
 )
 
+from backend.handler.vehicles import VehicleHandler
+
+from backend.models.vehicles import (
+    VehicleCreate,
+    VehicleUpdate,
+    VehicleResponse,
+    VehicleListResponse,
+    VehicleDeleteResponse,
+    VehicleCurrentLocationResponse,
+)
 
 # ---------------------------------------------------------
 # Pydantic health response models
@@ -264,6 +275,154 @@ def delete_driver(driver_id: int):
 
 
 # ---------------------------------------------------------
+# Vehicle Handler
+# ---------------------------------------------------------
+
+vehicle_handler = VehicleHandler()
+
+
+# ---------------------------------------------------------
+# Vehicle validation helpers
+# ---------------------------------------------------------
+
+def validate_vehicle_id(vehicle_id: int):
+    if vehicle_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="vehicle_id must be a positive integer",
+        )
+    return vehicle_id
+
+
+# ---------------------------------------------------------
+# POST /api/v1/vehicles
+# ---------------------------------------------------------
+
+@app.post(
+    "/api/v1/vehicles",
+    response_model=VehicleResponse,
+    status_code=201,
+    tags=["Vehicles"],
+)
+def create_vehicle(vehicle: VehicleCreate):
+    return vehicle_handler.create_vehicle(
+        vehicle.model_dump()
+    )
+
+
+# ---------------------------------------------------------
+# GET /api/v1/vehicles
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/v1/vehicles",
+    response_model=VehicleListResponse,
+    tags=["Vehicles"],
+)
+def get_vehicles(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    plate_number: str | None = None,
+    status: str | None = None,
+):
+    parsed_limit = parse_nonnegative_integer(limit, "limit")
+    parsed_offset = parse_nonnegative_integer(offset, "offset")
+
+    return vehicle_handler.get_vehicles(
+        limit=parsed_limit,
+        offset=parsed_offset,
+        plate_number=plate_number,
+        status=status,
+    )
+
+
+# ---------------------------------------------------------
+# GET /api/v1/vehicles/{vehicle_id}
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/v1/vehicles/{vehicle_id}",
+    response_model=VehicleResponse,
+    tags=["Vehicles"],
+)
+def get_vehicle(vehicle_id: int):
+    validate_vehicle_id(vehicle_id)
+
+    return vehicle_handler.get_vehicle_by_id(vehicle_id)
+
+
+# ---------------------------------------------------------
+# PUT /api/v1/vehicles/{vehicle_id}
+# ---------------------------------------------------------
+
+@app.put(
+    "/api/v1/vehicles/{vehicle_id}",
+    response_model=VehicleResponse,
+    tags=["Vehicles"],
+)
+def update_vehicle(vehicle_id: int, vehicle: VehicleUpdate):
+    validate_vehicle_id(vehicle_id)
+
+    changes = vehicle.model_dump(exclude_unset=True)
+
+    if not changes:
+        raise HTTPException(
+            status_code=400,
+            detail="At least one field must be supplied",
+        )
+
+    for required_field in (
+        "vehicle_type_id",
+        "vehicle_status_id",
+        "plate_number",
+    ):
+        if required_field in changes and changes[required_field] is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"{required_field} cannot be null",
+            )
+
+    return vehicle_handler.update_vehicle(vehicle_id, changes)
+
+
+# ---------------------------------------------------------
+# DELETE /api/v1/vehicles/{vehicle_id}
+# ---------------------------------------------------------
+
+@app.delete(
+    "/api/v1/vehicles/{vehicle_id}",
+    response_model=VehicleDeleteResponse,
+    tags=["Vehicles"],
+)
+def delete_vehicle(vehicle_id: int):
+    validate_vehicle_id(vehicle_id)
+
+    return vehicle_handler.delete_vehicle(vehicle_id)
+
+
+# ---------------------------------------------------------
+# GET /api/v1/vehicles/{vehicle_id}/current-location
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/v1/vehicles/{vehicle_id}/current-location",
+    response_model=VehicleCurrentLocationResponse,
+    responses={204: {"description": "Vehicle has no location pings"}},
+    tags=["Vehicles"],
+)
+def get_vehicle_current_location(vehicle_id: int):
+    validate_vehicle_id(vehicle_id)
+
+    location = vehicle_handler.get_current_location(vehicle_id)
+
+    if location is None:
+        return Response(status_code=204)
+
+    return location
+
+
+
+# ---------------------------------------------------------
 # Validation error handler
 # ---------------------------------------------------------
 
@@ -272,7 +431,6 @@ async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ):
-
     errors = exc.errors()
 
     malformed_json = any(
@@ -283,13 +441,22 @@ async def validation_exception_handler(
     if malformed_json:
         return JSONResponse(
             status_code=400,
-            content={
-                "detail": "Malformed JSON request body"
-            },
+            content={"detail": "Malformed JSON request body"},
         )
 
+    is_vehicle_body_request = (
+        request.method in ("POST", "PUT")
+        and (
+            request.url.path == "/api/v1/vehicles"
+            or (
+                request.url.path.startswith("/api/v1/vehicles/")
+                and request.method == "PUT"
+            )
+        )
+    )
+
     return JSONResponse(
-        status_code=422,
+        status_code=400 if is_vehicle_body_request else 422,
         content={
             "detail": [
                 {
