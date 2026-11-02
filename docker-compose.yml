@@ -1,3 +1,4 @@
+
 services:
   postgres:
     image: postgis/postgis:17-3.5
@@ -36,7 +37,7 @@ services:
     volumes:
       - ${DATA_DIR:-./data}:/data:ro
 
-  # NEW: Phase 2 FastAPI Backend
+  # Original FastAPI backend - production/local database
   backend:
     build:
       context: .
@@ -56,6 +57,28 @@ services:
       APP_ENV: local
     ports:
       - "8000:8000"
+
+  # Isolated FastAPI backend - test database only
+  backend-test:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: car-tracking-api-test
+    profiles: ["test"]
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DB_HOST: postgres
+      DB_PORT: "5432"
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_NAME: cartracking_test
+      DB_SSLMODE: disable
+      APP_ENV: test
+    ports:
+      - "127.0.0.1:8001:8000"
 
 volumes:
   postgres_data:
