@@ -10,6 +10,7 @@ from backend.config.dbconfig import initialize_connection_pool, close_connection
 from backend.handler.health import HealthHandler
 from backend.handler.drivers import DriverHandler
 from backend.handler.vehicles import VehicleHandler
+from backend.handler.vehicle_assignments import VehicleAssignmentHandler
 from backend.dao.drivers import (
     DriverCreate, DriverUpdate, DriverResponse, DriverListResponse,
     DriverDeleteResponse,
@@ -17,6 +18,10 @@ from backend.dao.drivers import (
 from backend.dao.vehicles import (
     VehicleCreate, VehicleUpdate, VehicleResponse, VehicleListResponse,
     VehicleDeleteResponse, VehicleCurrentLocationResponse,
+)
+from backend.dao.vehicle_assignments import (
+    AssignmentCreate, AssignmentUpdate, AssignmentResponse,
+    AssignmentListResponse, AssignmentDeleteResponse,
 )
 
 
@@ -422,6 +427,113 @@ def get_vehicle_current_location(vehicle_id: int):
 
 
 # ---------------------------------------------------------
+# Vehicle Assignment REST API 
+# ---------------------------------------------------------
+
+assignment_handler = VehicleAssignmentHandler()
+
+
+def validate_assignment_id(assignment_id: int):
+    if assignment_id <= 0:
+        raise HTTPException(status_code=400, detail="assignment_id must be a positive integer.")
+    return assignment_id
+
+
+@app.post(
+    "/api/v1/vehicle-assignments",
+    response_model=AssignmentResponse,
+    status_code=201,
+    response_description="Vehicle assignment was created successfully.",
+    responses={
+        400: {"description": "Malformed JSON or invalid payload shape."},
+        404: {"description": "Referenced vehicle_id or driver_id does not exist."},
+        422: {"description": "The assignment time interval is invalid."},
+    },
+    tags=["Vehicle Assignments"],
+)
+def create_assignment(assignment: AssignmentCreate):
+    return assignment_handler.create_assignment(assignment.model_dump())
+
+
+@app.get(
+    "/api/v1/vehicle-assignments",
+    response_model=AssignmentListResponse,
+    response_description="Vehicle assignment collection returned successfully.",
+    responses={400: {"description": "Invalid query parameter values."}},
+    tags=["Vehicle Assignments"],
+)
+def get_assignments(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    vehicle_id: str | None = None,
+    driver_id: str | None = None,
+    active: str | None = None,
+):
+    try:
+        parsed_limit = parse_nonnegative_integer(limit, "limit")
+        parsed_offset = parse_nonnegative_integer(offset, "offset")
+        parsed_vehicle_id = (
+            parse_nonnegative_integer(vehicle_id, "vehicle_id")
+            if vehicle_id is not None else None
+        )
+        parsed_driver_id = (
+            parse_nonnegative_integer(driver_id, "driver_id")
+            if driver_id is not None else None
+        )
+        if parsed_vehicle_id == 0 or parsed_driver_id == 0:
+            raise ValueError("IDs must be positive")
+        if active is not None and active.lower() not in ("true", "false"):
+            raise ValueError("active must be true or false")
+    except (HTTPException, ValueError) as error:
+        raise HTTPException(status_code=400, detail="Invalid query parameter values.") from error
+    return assignment_handler.get_assignments(
+        parsed_limit, parsed_offset, parsed_vehicle_id, parsed_driver_id,
+        active.lower() == "true" if active is not None else None,
+    )
+
+
+@app.get(
+    "/api/v1/vehicle-assignments/{assignment_id}",
+    response_model=AssignmentResponse,
+    response_description="Vehicle assignment returned successfully.",
+    responses={404: {"description": "assignment_id does not exist."}},
+    tags=["Vehicle Assignments"],
+)
+def get_assignment(assignment_id: int):
+    validate_assignment_id(assignment_id)
+    return assignment_handler.get_assignment_by_id(assignment_id)
+
+
+@app.put(
+    "/api/v1/vehicle-assignments/{assignment_id}",
+    response_model=AssignmentResponse,
+    response_description="Vehicle assignment updated successfully.",
+    responses={
+        400: {"description": "Malformed JSON or empty update payload."},
+        404: {"description": "assignment_id or a referenced foreign key does not exist."},
+        422: {"description": "The resulting assignment interval is invalid."},
+    },
+    tags=["Vehicle Assignments"],
+)
+def update_assignment(assignment_id: int, assignment: AssignmentUpdate):
+    validate_assignment_id(assignment_id)
+    changes = assignment.model_dump(exclude_unset=True)
+    return assignment_handler.update_assignment(assignment_id, changes)
+
+
+@app.delete(
+    "/api/v1/vehicle-assignments/{assignment_id}",
+    response_model=AssignmentDeleteResponse,
+    response_description="Vehicle assignment deleted successfully.",
+    responses={404: {"description": "assignment_id does not exist."}},
+    tags=["Vehicle Assignments"],
+)
+def delete_assignment(assignment_id: int):
+    validate_assignment_id(assignment_id)
+    return assignment_handler.delete_assignment(assignment_id)
+
+
+# ---------------------------------------------------------
 # Validation error handler
 # ---------------------------------------------------------
 
@@ -449,6 +561,26 @@ async def validation_exception_handler(
         error.get("type") == "json_invalid"
         for error in errors
     )
+
+    # Assignment response codes: malformed bodies -> 400, invalid fields -> 422.
+    if path.startswith("/api/v1/vehicle-assignments"):
+        path_error = any(error.get("loc", [None])[0] == "path" for error in errors)
+        if path_error:
+            return JSONResponse(status_code=400, content={"detail": "assignment_id must be a positive integer."})
+        if method == "GET":
+            return JSONResponse(status_code=400, content={"detail": "Invalid query parameter values."})
+        malformed_shape = any(
+            error.get("type") in ("json_invalid", "model_attributes_type", "model_type", "dict_type", "list_type")
+            for error in errors
+        )
+        if method == "POST":
+            if malformed_shape:
+                return JSONResponse(status_code=400, content={"detail": "Malformed JSON or invalid payload shape."})
+            return JSONResponse(status_code=422, content={"detail": "A required field is null or invalid."})
+        if method == "PUT":
+            if malformed_shape:
+                return JSONResponse(status_code=400, content={"detail": "Malformed JSON or empty update payload."})
+            return JSONResponse(status_code=422, content={"detail": "A supplied field is null or invalid."})
 
     # -----------------------------------------------------
     # Vehicle validation - preserve existing behavior
@@ -614,6 +746,12 @@ def custom_openapi():
         if path.startswith("/api/v1/vehicles"):
             for method_details in methods.values():
                 if isinstance(method_details, dict):
+                    method_details.get("responses", {}).pop("422", None)
+
+        # Assignment rubric documents HTTP 422 only for POST and PUT.
+        if path.startswith("/api/v1/vehicle-assignments"):
+            for method, method_details in methods.items():
+                if isinstance(method_details, dict) and method.lower() not in ("post", "put"):
                     method_details.get("responses", {}).pop("422", None)
 
         # Driver rubric documents HTTP 422 only for POST and PUT.
