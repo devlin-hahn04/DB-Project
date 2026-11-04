@@ -25,29 +25,44 @@ class VehicleHandler:
     def __init__(self):
         self.dao = VehicleDAO()
 
-    def _handle_integrity_error(self, error):
+    def _handle_integrity_error(self, error, operation):
         if error.pgcode == UNIQUE_VIOLATION:
+            detail = (
+                "plate_number already exists."
+                if operation == "create"
+                else "Updated plate_number conflicts with another vehicle."
+            )
             raise HTTPException(
                 status_code=409,
-                detail="Vehicle plate number already exists",
+                detail=detail,
             ) from error
 
         if error.pgcode == FOREIGN_KEY_VIOLATION:
+            detail = (
+                "Referenced vehicle_type_id or vehicle_status_id does not exist."
+                if operation == "create"
+                else "vehicle_id or referenced foreign key does not exist."
+            )
             raise HTTPException(
                 status_code=404,
-                detail="Referenced vehicle type or status not found",
+                detail=detail,
             ) from error
 
         if error.pgcode in (NOT_NULL_VIOLATION, CHECK_VIOLATION):
+            detail = (
+                "Malformed JSON or invalid payload shape."
+                if operation == "create"
+                else "Malformed JSON or empty payload."
+            )
             raise HTTPException(
                 status_code=400,
-                detail="Vehicle violates a required field constraint",
+                detail=detail,
             ) from error
 
-        logger.exception("Vehicle database constraint violation")
+        logger.exception("Unexpected vehicle database constraint violation")
         raise HTTPException(
-            status_code=422,
-            detail="Vehicle violates a database constraint",
+            status_code=500,
+            detail="Internal server error",
         ) from error
 
     def create_vehicle(self, data):
@@ -55,7 +70,7 @@ class VehicleHandler:
             return self.dao.create_vehicle(data)
 
         except IntegrityError as error:
-            self._handle_integrity_error(error)
+            self._handle_integrity_error(error, "create")
 
         except Exception:
             logger.exception("Vehicle creation failed")
@@ -78,7 +93,7 @@ class VehicleHandler:
         if vehicle is None:
             raise HTTPException(
                 status_code=404,
-                detail="Vehicle not found",
+                detail="vehicle_id does not exist.",
             )
 
         return vehicle
@@ -111,7 +126,7 @@ class VehicleHandler:
             vehicle = self.dao.update_vehicle(vehicle_id, data)
 
         except IntegrityError as error:
-            self._handle_integrity_error(error)
+            self._handle_integrity_error(error, "update")
 
         except Exception:
             logger.exception("Vehicle update failed")
@@ -123,7 +138,7 @@ class VehicleHandler:
         if vehicle is None:
             raise HTTPException(
                 status_code=404,
-                detail="Vehicle not found",
+                detail="vehicle_id or referenced foreign key does not exist.",
             )
 
         return vehicle
@@ -137,15 +152,15 @@ class VehicleHandler:
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Vehicle is referenced by a location ping, "
-                        "trip, or vehicle assignment."
+                        "Deletion is blocked by business rules/"
+                        "foreign key constraints."
                     ),
                 ) from error
 
-            logger.exception("Vehicle deletion constraint violation")
+            logger.exception("Unexpected vehicle deletion constraint violation")
             raise HTTPException(
-                status_code=422,
-                detail="Vehicle violates a database constraint",
+                status_code=500,
+                detail="Internal server error",
             ) from error
 
         except Exception:
@@ -158,7 +173,7 @@ class VehicleHandler:
         if not deleted:
             raise HTTPException(
                 status_code=404,
-                detail="Vehicle not found",
+                detail="vehicle_id does not exist.",
             )
 
         return {
