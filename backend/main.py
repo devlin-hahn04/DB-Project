@@ -1,42 +1,22 @@
-
 from contextlib import asynccontextmanager
 
-from fastapi import (
-    FastAPI,
-    HTTPException,
-    Query,
-    Request,
-    Response,
-)
+from fastapi import FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-
+from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel
 
-from backend.config.dbconfig import (
-    initialize_connection_pool,
-    close_connection_pool,
-)
-
+from backend.config.dbconfig import initialize_connection_pool, close_connection_pool
 from backend.handler.health import HealthHandler
 from backend.handler.drivers import DriverHandler
 from backend.handler.vehicles import VehicleHandler
-
 from backend.dao.drivers import (
-    DriverCreate,
-    DriverUpdate,
-    DriverResponse,
-    DriverListResponse,
+    DriverCreate, DriverUpdate, DriverResponse, DriverListResponse,
     DriverDeleteResponse,
 )
-
 from backend.dao.vehicles import (
-    VehicleCreate,
-    VehicleUpdate,
-    VehicleResponse,
-    VehicleListResponse,
-    VehicleDeleteResponse,
-    VehicleCurrentLocationResponse,
+    VehicleCreate, VehicleUpdate, VehicleResponse, VehicleListResponse,
+    VehicleDeleteResponse, VehicleCurrentLocationResponse,
 )
 
 
@@ -82,52 +62,32 @@ app = FastAPI(
 
 
 # ---------------------------------------------------------
-# Root endpoint
+# Root and health endpoints
 # ---------------------------------------------------------
 
 @app.get("/")
 def root():
-    return {
-        "application": "Car Tracking REST API",
-        "version": "1.0.0",
-        "status": "running",
-    }
+    return {"application": "Car Tracking REST API", "version": "1.0.0", "status": "running"}
 
 
-# ---------------------------------------------------------
-# Health endpoints
-# ---------------------------------------------------------
-
-@app.get(
-    "/api/v1/health",
-    response_model=HealthResponse,
-)
+@app.get("/api/v1/health", response_model=HealthResponse)
 def health():
-    return {
-        "status": "ok",
-        "service": "backend",
-    }
+    return {"status": "ok", "service": "backend"}
 
 
-@app.get(
-    "/api/v1/health/database",
-    response_model=DatabaseHealthResponse,
-)
+@app.get("/api/v1/health/database", response_model=DatabaseHealthResponse)
 def database_health():
     handler = HealthHandler()
     return handler.get_database_status()
 
 
+
 # ---------------------------------------------------------
-# Driver Handler
+# Driver Handler and validation helpers
 # ---------------------------------------------------------
 
 driver_handler = DriverHandler()
 
-
-# ---------------------------------------------------------
-# Driver validation helpers
-# ---------------------------------------------------------
 
 def validate_driver_id(driver_id: int):
     if driver_id <= 0:
@@ -155,12 +115,22 @@ def parse_nonnegative_integer(value: str, field_name: str):
     "/api/v1/drivers",
     response_model=DriverResponse,
     status_code=201,
+    response_description="Driver was created successfully.",
+    responses={
+        400: {
+            "description": "Malformed JSON or invalid payload shape."
+        },
+        409: {
+            "description": "license_number already exists."
+        },
+        422: {
+            "description": "A required field is null or invalid."
+        },
+    },
     tags=["Drivers"],
 )
 def create_driver(driver: DriverCreate):
-    return driver_handler.create_driver(
-        driver.model_dump()
-    )
+    return driver_handler.create_driver(driver.model_dump())
 
 
 # ---------------------------------------------------------
@@ -170,6 +140,12 @@ def create_driver(driver: DriverCreate):
 @app.get(
     "/api/v1/drivers",
     response_model=DriverListResponse,
+    response_description="Driver collection returned successfully.",
+    responses={
+        400: {
+            "description": "Invalid query parameter values."
+        },
+    },
     tags=["Drivers"],
 )
 def get_drivers(
@@ -178,15 +154,14 @@ def get_drivers(
     name: str | None = None,
     license_number: str | None = None,
 ):
-    parsed_limit = parse_nonnegative_integer(
-        limit,
-        "limit",
-    )
-
-    parsed_offset = parse_nonnegative_integer(
-        offset,
-        "offset",
-    )
+    try:
+        parsed_limit = parse_nonnegative_integer(limit, "limit")
+        parsed_offset = parse_nonnegative_integer(offset, "offset")
+    except HTTPException as error:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid query parameter values.",
+        ) from error
 
     return driver_handler.get_drivers(
         limit=parsed_limit,
@@ -203,14 +178,17 @@ def get_drivers(
 @app.get(
     "/api/v1/drivers/{driver_id}",
     response_model=DriverResponse,
+    response_description="Driver returned successfully.",
+    responses={
+        404: {
+            "description": "driver_id does not exist."
+        },
+    },
     tags=["Drivers"],
 )
 def get_driver(driver_id: int):
     validate_driver_id(driver_id)
-
-    return driver_handler.get_driver_by_id(
-        driver_id
-    )
+    return driver_handler.get_driver_by_id(driver_id)
 
 
 # ---------------------------------------------------------
@@ -220,28 +198,37 @@ def get_driver(driver_id: int):
 @app.put(
     "/api/v1/drivers/{driver_id}",
     response_model=DriverResponse,
+    response_description="Driver updated successfully.",
+    responses={
+        400: {
+            "description": "Malformed JSON or empty update payload."
+        },
+        404: {
+            "description": "driver_id does not exist."
+        },
+        409: {
+            "description": (
+                "Updated license_number conflicts with another driver."
+            )
+        },
+        422: {
+            "description": "A supplied field is null or invalid."
+        },
+    },
     tags=["Drivers"],
 )
-def update_driver(
-    driver_id: int,
-    driver: DriverUpdate,
-):
+def update_driver(driver_id: int, driver: DriverUpdate):
     validate_driver_id(driver_id)
 
-    changes = driver.model_dump(
-        exclude_unset=True
-    )
+    changes = driver.model_dump(exclude_unset=True)
 
     if not changes:
         raise HTTPException(
             status_code=400,
-            detail="At least one field must be supplied",
+            detail="Malformed JSON or empty update payload.",
         )
 
-    return driver_handler.update_driver(
-        driver_id,
-        changes,
-    )
+    return driver_handler.update_driver(driver_id, changes)
 
 
 # ---------------------------------------------------------
@@ -251,33 +238,47 @@ def update_driver(
 @app.delete(
     "/api/v1/drivers/{driver_id}",
     response_model=DriverDeleteResponse,
+    response_description="Driver deleted successfully.",
+    responses={
+        404: {
+            "description": "driver_id does not exist."
+        },
+        409: {
+            "description": (
+                "The driver is referenced by a vehicle assignment."
+            )
+        },
+    },
     tags=["Drivers"],
 )
 def delete_driver(driver_id: int):
     validate_driver_id(driver_id)
+    return driver_handler.delete_driver(driver_id)
 
-    return driver_handler.delete_driver(
-        driver_id
-    )
 
 
 # ---------------------------------------------------------
-# Vehicle Handler
+# Vehicle Handler and validation helper
 # ---------------------------------------------------------
 
 vehicle_handler = VehicleHandler()
 
 
-# ---------------------------------------------------------
-# Vehicle validation helpers
-# ---------------------------------------------------------
-
-def validate_vehicle_id(vehicle_id: int):
+def validate_vehicle_id(
+    vehicle_id: int,
+    current_location: bool = False,
+    updating: bool = False,
+):
     if vehicle_id <= 0:
         raise HTTPException(
             status_code=400,
-            detail="vehicle_id must be a positive integer",
+            detail=(
+                "vehicle_id is not a positive integer."
+                if current_location
+                else "vehicle_id must be a positive integer"
+            ),
         )
+
     return vehicle_id
 
 
@@ -289,12 +290,16 @@ def validate_vehicle_id(vehicle_id: int):
     "/api/v1/vehicles",
     response_model=VehicleResponse,
     status_code=201,
+    response_description="Vehicle was created successfully.",
+    responses={
+        400: {"description": "Malformed JSON or invalid payload shape."},
+        404: {"description": "Referenced vehicle_type_id or vehicle_status_id does not exist."},
+        409: {"description": "plate_number already exists."},
+    },
     tags=["Vehicles"],
 )
 def create_vehicle(vehicle: VehicleCreate):
-    return vehicle_handler.create_vehicle(
-        vehicle.model_dump()
-    )
+    return vehicle_handler.create_vehicle(vehicle.model_dump())
 
 
 # ---------------------------------------------------------
@@ -304,6 +309,8 @@ def create_vehicle(vehicle: VehicleCreate):
 @app.get(
     "/api/v1/vehicles",
     response_model=VehicleListResponse,
+    response_description="Vehicle collection returned successfully.",
+    responses={400: {"description": "Invalid query parameter values."}},
     tags=["Vehicles"],
 )
 def get_vehicles(
@@ -312,21 +319,17 @@ def get_vehicles(
     plate_number: str | None = None,
     status: str | None = None,
 ):
-    parsed_limit = parse_nonnegative_integer(
-        limit,
-        "limit",
-    )
-
-    parsed_offset = parse_nonnegative_integer(
-        offset,
-        "offset",
-    )
+    try:
+        parsed_limit = parse_nonnegative_integer(limit, "limit")
+        parsed_offset = parse_nonnegative_integer(offset, "offset")
+    except HTTPException as error:
+        raise HTTPException(
+            status_code=400, detail="Invalid query parameter values."
+        ) from error
 
     return vehicle_handler.get_vehicles(
-        limit=parsed_limit,
-        offset=parsed_offset,
-        plate_number=plate_number,
-        status=status,
+        limit=parsed_limit, offset=parsed_offset,
+        plate_number=plate_number, status=status,
     )
 
 
@@ -337,14 +340,13 @@ def get_vehicles(
 @app.get(
     "/api/v1/vehicles/{vehicle_id}",
     response_model=VehicleResponse,
+    response_description="Vehicle returned successfully.",
+    responses={404: {"description": "vehicle_id does not exist."}},
     tags=["Vehicles"],
 )
 def get_vehicle(vehicle_id: int):
     validate_vehicle_id(vehicle_id)
-
-    return vehicle_handler.get_vehicle_by_id(
-        vehicle_id
-    )
+    return vehicle_handler.get_vehicle_by_id(vehicle_id)
 
 
 # ---------------------------------------------------------
@@ -354,42 +356,27 @@ def get_vehicle(vehicle_id: int):
 @app.put(
     "/api/v1/vehicles/{vehicle_id}",
     response_model=VehicleResponse,
+    response_description="Vehicle updated successfully.",
+    responses={
+        400: {"description": "Malformed JSON or empty payload."},
+        404: {"description": "vehicle_id or referenced foreign key does not exist."},
+        409: {"description": "Updated plate_number conflicts with another vehicle."},
+    },
     tags=["Vehicles"],
 )
-def update_vehicle(
-    vehicle_id: int,
-    vehicle: VehicleUpdate,
-):
-    validate_vehicle_id(vehicle_id)
-
-    changes = vehicle.model_dump(
-        exclude_unset=True
-    )
-
+def update_vehicle(vehicle_id: int, vehicle: VehicleUpdate):
+    validate_vehicle_id(vehicle_id, updating=True)
+    changes = vehicle.model_dump(exclude_unset=True)
     if not changes:
-        raise HTTPException(
-            status_code=400,
-            detail="At least one field must be supplied",
-        )
+        raise HTTPException(status_code=400, detail="Malformed JSON or empty payload.")
 
     for required_field in (
-        "vehicle_type_id",
-        "vehicle_status_id",
-        "plate_number",
+        "vehicle_type_id", "vehicle_status_id", "plate_number",
     ):
-        if (
-            required_field in changes
-            and changes[required_field] is None
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=f"{required_field} cannot be null",
-            )
+        if required_field in changes and changes[required_field] is None:
+            raise HTTPException(status_code=400, detail="Malformed JSON or empty payload.")
 
-    return vehicle_handler.update_vehicle(
-        vehicle_id,
-        changes,
-    )
+    return vehicle_handler.update_vehicle(vehicle_id, changes)
 
 
 # ---------------------------------------------------------
@@ -399,14 +386,16 @@ def update_vehicle(
 @app.delete(
     "/api/v1/vehicles/{vehicle_id}",
     response_model=VehicleDeleteResponse,
+    response_description="Vehicle deleted successfully.",
+    responses={
+        404: {"description": "vehicle_id does not exist."},
+        409: {"description": "Deletion is blocked by business rules/foreign key constraints."},
+    },
     tags=["Vehicles"],
 )
 def delete_vehicle(vehicle_id: int):
     validate_vehicle_id(vehicle_id)
-
-    return vehicle_handler.delete_vehicle(
-        vehicle_id
-    )
+    return vehicle_handler.delete_vehicle(vehicle_id)
 
 
 # ---------------------------------------------------------
@@ -416,23 +405,19 @@ def delete_vehicle(vehicle_id: int):
 @app.get(
     "/api/v1/vehicles/{vehicle_id}/current-location",
     response_model=VehicleCurrentLocationResponse,
+    response_description="Current location returned.",
     responses={
-        204: {
-            "description": "Vehicle has no location pings"
-        }
+        400: {"description": "vehicle_id is not a positive integer."},
+        404: {"description": "vehicle_id does not exist."},
+        204: {"description": "Vehicle exists but has no recorded pings yet."},
     },
     tags=["Vehicles"],
 )
 def get_vehicle_current_location(vehicle_id: int):
-    validate_vehicle_id(vehicle_id)
-
-    location = vehicle_handler.get_current_location(
-        vehicle_id
-    )
-
+    validate_vehicle_id(vehicle_id, current_location=True)
+    location = vehicle_handler.get_current_location(vehicle_id)
     if location is None:
         return Response(status_code=204)
-
     return location
 
 
@@ -440,41 +425,160 @@ def get_vehicle_current_location(vehicle_id: int):
 # Validation error handler
 # ---------------------------------------------------------
 
+
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
     request: Request,
     exc: RequestValidationError,
 ):
     errors = exc.errors()
+    path = request.url.path
+    method = request.method
+
+    is_vehicle_request = (
+        path == "/api/v1/vehicles"
+        or path.startswith("/api/v1/vehicles/")
+    )
+
+    is_driver_request = (
+        path == "/api/v1/drivers"
+        or path.startswith("/api/v1/drivers/")
+    )
 
     malformed_json = any(
         error.get("type") == "json_invalid"
         for error in errors
     )
 
+    # -----------------------------------------------------
+    # Vehicle validation - preserve existing behavior
+    # -----------------------------------------------------
+
+    if is_vehicle_request:
+        if method == "POST" and path == "/api/v1/vehicles":
+            status_code = 400
+            detail = "Malformed JSON or invalid payload shape."
+
+        elif method == "GET" and path == "/api/v1/vehicles":
+            status_code = 400
+            detail = "Invalid query parameter values."
+
+        elif method == "GET" and path.endswith("/current-location"):
+            status_code = 400
+            detail = "vehicle_id is not a positive integer."
+
+        elif method == "PUT":
+            status_code = 400
+
+            if any(
+                error.get("loc", [None])[0] == "path"
+                for error in errors
+            ):
+                detail = "vehicle_id must be a positive integer"
+            else:
+                detail = "Malformed JSON or empty payload."
+
+        elif method in ("GET", "DELETE"):
+            status_code = 400
+            detail = "vehicle_id must be a positive integer"
+
+        else:
+            status_code = 400
+            detail = "Malformed JSON or invalid payload shape."
+
+        return JSONResponse(
+            status_code=status_code,
+            content={"detail": detail},
+        )
+
+    # -----------------------------------------------------
+    # Driver validation
+    # -----------------------------------------------------
+
+    if is_driver_request:
+        path_error = any(
+            error.get("loc", [None])[0] == "path"
+            for error in errors
+        )
+
+        if path_error:
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "driver_id must be a positive integer"
+                },
+            )
+
+        if method == "GET" and path == "/api/v1/drivers":
+            return JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Invalid query parameter values."
+                },
+            )
+
+        invalid_payload_shape = any(
+            error.get("type") in (
+                "model_attributes_type",
+                "model_type",
+                "dict_type",
+                "list_type",
+            )
+            for error in errors
+        )
+
+        if method == "POST":
+            if malformed_json or invalid_payload_shape:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": (
+                            "Malformed JSON or invalid payload shape."
+                        )
+                    },
+                )
+
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": (
+                        "A required field is null or invalid."
+                    )
+                },
+            )
+
+        if method == "PUT":
+            if malformed_json or invalid_payload_shape:
+                return JSONResponse(
+                    status_code=400,
+                    content={
+                        "detail": (
+                            "Malformed JSON or empty update payload."
+                        )
+                    },
+                )
+
+            return JSONResponse(
+                status_code=422,
+                content={
+                    "detail": (
+                        "A supplied field is null or invalid."
+                    )
+                },
+            )
+
+    # -----------------------------------------------------
+    # Other endpoints
+    # -----------------------------------------------------
+
     if malformed_json:
         return JSONResponse(
             status_code=400,
-            content={
-                "detail": "Malformed JSON request body"
-            },
+            content={"detail": "Malformed JSON request body"},
         )
-
-    is_vehicle_body_request = (
-        request.method in ("POST", "PUT")
-        and (
-            request.url.path == "/api/v1/vehicles"
-            or (
-                request.url.path.startswith(
-                    "/api/v1/vehicles/"
-                )
-                and request.method == "PUT"
-            )
-        )
-    )
 
     return JSONResponse(
-        status_code=400 if is_vehicle_body_request else 422,
+        status_code=422,
         content={
             "detail": [
                 {
@@ -486,3 +590,43 @@ async def validation_exception_handler(
             ]
         },
     )
+
+
+
+# ---------------------------------------------------------
+# Customize Swagger UI / OpenAPI documentation
+# ---------------------------------------------------------
+
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+
+    for path, methods in openapi_schema["paths"].items():
+
+        # Vehicle rubric does not document HTTP 422.
+        if path.startswith("/api/v1/vehicles"):
+            for method_details in methods.values():
+                if isinstance(method_details, dict):
+                    method_details.get("responses", {}).pop("422", None)
+
+        # Driver rubric documents HTTP 422 only for POST and PUT.
+        if path.startswith("/api/v1/drivers"):
+            for method, method_details in methods.items():
+                if (
+                    isinstance(method_details, dict)
+                    and method.lower() not in ("post", "put")
+                ):
+                    method_details.get("responses", {}).pop("422", None)
+
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+
+app.openapi = custom_openapi
