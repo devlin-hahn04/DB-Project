@@ -12,6 +12,7 @@ from backend.handler.drivers import DriverHandler
 from backend.handler.vehicles import VehicleHandler
 from backend.handler.vehicle_assignments import VehicleAssignmentHandler
 from backend.handler.location_pings import LocationPingHandler
+from backend.handler.parking_areas import ParkingAreaHandler
 from backend.dao.drivers import (
     DriverCreate, DriverUpdate, DriverResponse, DriverListResponse,
     DriverDeleteResponse,
@@ -27,6 +28,10 @@ from backend.dao.vehicle_assignments import (
 from backend.dao.location_pings import (
     LocationPingCreate, LocationPingUpdate, LocationPingResponse,
     LocationPingListResponse, LocationPingDeleteResponse, VehiclePingListResponse,
+)
+from backend.dao.parking_areas import (
+    ParkingAreaCreate, ParkingAreaUpdate, ParkingAreaResponse,
+    ParkingAreaListResponse, ParkingAreaDeleteResponse,
 )
 
 
@@ -432,7 +437,7 @@ def get_vehicle_current_location(vehicle_id: int):
 
 
 # ---------------------------------------------------------
-# Vehicle Assignment REST API 
+# Vehicle Assignment REST API (Issue #20)
 # ---------------------------------------------------------
 
 assignment_handler = VehicleAssignmentHandler()
@@ -536,6 +541,94 @@ def update_assignment(assignment_id: int, assignment: AssignmentUpdate):
 def delete_assignment(assignment_id: int):
     validate_assignment_id(assignment_id)
     return assignment_handler.delete_assignment(assignment_id)
+
+
+# ---------------------------------------------------------
+# Parking Area REST API (Issue #21)
+# ---------------------------------------------------------
+
+parking_area_handler = ParkingAreaHandler()
+
+
+def validate_parking_area_id(parking_area_id: int):
+    if parking_area_id <= 0:
+        raise HTTPException(status_code=400, detail="parking_area_id must be a positive integer.")
+    return parking_area_id
+
+
+@app.post(
+    "/api/v1/parking-areas",
+    response_model=ParkingAreaResponse,
+    status_code=201,
+    response_description="Parking area created successfully.",
+    responses={400: {"description": "Malformed geometry or invalid JSON."}},
+    tags=["Parking Areas"],
+)
+def create_parking_area(parking_area: ParkingAreaCreate):
+    return parking_area_handler.create_parking_area(parking_area.model_dump())
+
+
+@app.get(
+    "/api/v1/parking-areas",
+    response_model=ParkingAreaListResponse,
+    response_description="Parking area collection returned.",
+    responses={400: {"description": "Invalid query parameter values."}},
+    tags=["Parking Areas"],
+)
+def get_parking_areas(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    name: str | None = None,
+    bbox: str | None = None,
+):
+    try:
+        parsed_limit = parse_nonnegative_integer(limit, "limit")
+        parsed_offset = parse_nonnegative_integer(offset, "offset")
+    except HTTPException as exc:
+        raise HTTPException(status_code=400, detail="Invalid query parameter values.") from exc
+    parsed_bbox = parking_area_handler.parse_bbox(bbox)
+    return parking_area_handler.get_parking_areas(parsed_limit, parsed_offset, name, parsed_bbox)
+
+
+@app.get(
+    "/api/v1/parking-areas/{parking_area_id}",
+    response_model=ParkingAreaResponse,
+    response_description="Parking area returned.",
+    responses={404: {"description": "parking_area_id does not exist."}},
+    tags=["Parking Areas"],
+)
+def get_parking_area(parking_area_id: int):
+    validate_parking_area_id(parking_area_id)
+    return parking_area_handler.get_parking_area_by_id(parking_area_id)
+
+
+@app.put(
+    "/api/v1/parking-areas/{parking_area_id}",
+    response_model=ParkingAreaResponse,
+    response_description="Parking area updated successfully.",
+    responses={
+        400: {"description": "Malformed JSON or empty patch payload."},
+        404: {"description": "parking_area_id does not exist."},
+    },
+    tags=["Parking Areas"],
+)
+def update_parking_area(parking_area_id: int, parking_area: ParkingAreaUpdate):
+    validate_parking_area_id(parking_area_id)
+    return parking_area_handler.update_parking_area(
+        parking_area_id, parking_area.model_dump(exclude_unset=True)
+    )
+
+
+@app.delete(
+    "/api/v1/parking-areas/{parking_area_id}",
+    response_model=ParkingAreaDeleteResponse,
+    response_description="Parking area deleted.",
+    responses={404: {"description": "parking_area_id does not exist."}},
+    tags=["Parking Areas"],
+)
+def delete_parking_area(parking_area_id: int):
+    validate_parking_area_id(parking_area_id)
+    return parking_area_handler.delete_parking_area(parking_area_id)
 
 
 # ---------------------------------------------------------
@@ -673,34 +766,15 @@ async def validation_exception_handler(
         for error in errors
     )
 
-    # -----------------------------------------------------
-    # Vehicle Assignment validation - rubric section 5.7
-    # -----------------------------------------------------
-
-    if (
-        path == "/api/v1/vehicle-assignments"
-        or path.startswith("/api/v1/vehicle-assignments/")
-    ):
-        path_error = any(
-            error.get("loc", [None])[0] == "path" for error in errors
-        )
+    # Assignment response codes: malformed bodies -> 400, invalid fields -> 422.
+    if path.startswith("/api/v1/vehicle-assignments"):
+        path_error = any(error.get("loc", [None])[0] == "path" for error in errors)
         if path_error:
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "assignment_id must be a positive integer."},
-            )
-
-        if method == "GET" and path == "/api/v1/vehicle-assignments":
-            return JSONResponse(
-                status_code=400,
-                content={"detail": "Invalid query parameter values."},
-            )
-
+            return JSONResponse(status_code=400, content={"detail": "assignment_id must be a positive integer."})
+        if method == "GET":
+            return JSONResponse(status_code=400, content={"detail": "Invalid query parameter values."})
         malformed_shape = any(
-            error.get("type") in (
-                "json_invalid", "model_attributes_type", "model_type",
-                "dict_type", "list_type",
-            )
+            error.get("type") in ("json_invalid", "model_attributes_type", "model_type", "dict_type", "list_type")
             for error in errors
         )
 
@@ -741,6 +815,17 @@ async def validation_exception_handler(
                 status_code=400, content={"detail": malformed_message}
             )
 
+    # Parking Area validation - preserve Issue #21 HTTP 400 responses.
+    if path == "/api/v1/parking-areas" or path.startswith("/api/v1/parking-areas/"):
+        if any(error.get("loc", [None])[0] == "path" for error in errors):
+            detail = "parking_area_id must be a positive integer."
+        elif method == "GET":
+            detail = "Invalid query parameter values."
+        elif method == "PUT":
+            detail = "Malformed JSON or empty patch payload."
+        else:
+            detail = "Malformed geometry or invalid JSON."
+        return JSONResponse(status_code=400, content={"detail": detail})
     # Location Ping validation - rubric section 5.4
 
     if (
@@ -919,6 +1004,12 @@ def custom_openapi():
 
         # Vehicle rubric does not document HTTP 422.
         if path.startswith("/api/v1/vehicles"):
+            for method_details in methods.values():
+                if isinstance(method_details, dict):
+                    method_details.get("responses", {}).pop("422", None)
+
+        # Parking Area rubric documents 400/404 but not 422.
+        if path.startswith("/api/v1/parking-areas"):
             for method_details in methods.values():
                 if isinstance(method_details, dict):
                     method_details.get("responses", {}).pop("422", None)
