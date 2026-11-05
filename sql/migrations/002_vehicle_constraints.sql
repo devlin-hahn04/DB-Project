@@ -1,4 +1,3 @@
-
 BEGIN;
 
 -- Require existing vehicle types and statuses.
