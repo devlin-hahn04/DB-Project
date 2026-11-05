@@ -69,6 +69,7 @@ def valid_latitude(value):
 
 class PointGeometry(BaseModel):
     """GeoJSON Point in EPSG:4326 longitude/latitude order."""
+    model_config = ConfigDict(extra="forbid")
 
     type: Literal["Point"]
     coordinates: list[float]
@@ -90,6 +91,7 @@ class PointGeometry(BaseModel):
 
 class LocationPingCreate(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "example": {
                 "vehicle_id": 1,
@@ -120,6 +122,7 @@ class LocationPingCreate(BaseModel):
 
 class LocationPingUpdate(BaseModel):
     model_config = ConfigDict(
+        extra="forbid",
         json_schema_extra={
             "example": {"speed_kph": 45.1, "heading_deg": 190.0}
         },
