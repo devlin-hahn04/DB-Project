@@ -11,6 +11,7 @@ from backend.handler.health import HealthHandler
 from backend.handler.drivers import DriverHandler
 from backend.handler.vehicles import VehicleHandler
 from backend.handler.vehicle_assignments import VehicleAssignmentHandler
+from backend.handler.location_pings import LocationPingHandler
 from backend.dao.drivers import (
     DriverCreate, DriverUpdate, DriverResponse, DriverListResponse,
     DriverDeleteResponse,
@@ -22,6 +23,10 @@ from backend.dao.vehicles import (
 from backend.dao.vehicle_assignments import (
     AssignmentCreate, AssignmentUpdate, AssignmentResponse,
     AssignmentListResponse, AssignmentDeleteResponse,
+)
+from backend.dao.location_pings import (
+    LocationPingCreate, LocationPingUpdate, LocationPingResponse,
+    LocationPingListResponse, LocationPingDeleteResponse, VehiclePingListResponse,
 )
 
 
@@ -534,6 +539,112 @@ def delete_assignment(assignment_id: int):
 
 
 # ---------------------------------------------------------
+# Location Ping REST API
+# ---------------------------------------------------------
+
+ping_handler = LocationPingHandler()
+
+
+def validate_ping_id(ping_id: int): #helper
+    if ping_id <= 0:
+        raise HTTPException(status_code=400, detail="ping_id must be a positive integer.")
+    return ping_id
+
+
+@app.post(
+    "/api/v1/location-pings",
+    response_model=LocationPingResponse,
+    status_code=201,
+    response_description="Location ping created successfully.",
+    responses={
+        400: {"description": "Malformed geometry or invalid JSON."},
+        404: {"description": "vehicle_id does not exist."},
+    },
+    tags=["Location Pings"],
+)
+def create_location_ping(ping: LocationPingCreate):
+    return ping_handler.create_ping(ping.model_dump())
+
+
+@app.get(
+    "/api/v1/location-pings",
+    response_model=LocationPingListResponse,
+    response_description="Ping collection returned.",
+    responses={400: {"description": "Invalid query parameter values."}},
+    tags=["Location Pings"],
+)
+def get_location_pings(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    vehicle_id: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+    bbox: str | None = Query(default=None, description="minLon,minLat,maxLon,maxLat"),
+):
+    return ping_handler.get_all_pings(limit, offset, vehicle_id, from_ts, to_ts, bbox)
+
+
+@app.get(
+    "/api/v1/location-pings/{ping_id}",
+    response_model=LocationPingResponse,
+    response_description="Ping returned successfully.",
+    responses={404: {"description": "ping_id does not exist."}},
+    tags=["Location Pings"],
+)
+def get_location_ping(ping_id: int):
+    validate_ping_id(ping_id)
+    return ping_handler.get_ping_by_id(ping_id)
+
+
+@app.put(
+    "/api/v1/location-pings/{ping_id}",
+    response_model=LocationPingResponse,
+    response_description="Ping updated successfully.",
+    responses={
+        400: {"description": "Malformed JSON or empty patch payload."},
+        404: {"description": "ping_id or referenced vehicle_id does not exist."},
+    },
+    tags=["Location Pings"],
+)
+def update_location_ping(ping_id: int, ping: LocationPingUpdate):
+    validate_ping_id(ping_id)
+    return ping_handler.update_ping(ping_id, ping.model_dump(exclude_unset=True))
+
+
+@app.delete(
+    "/api/v1/location-pings/{ping_id}",
+    response_model=LocationPingDeleteResponse,
+    response_description="Ping deleted.",
+    responses={404: {"description": "ping_id does not exist."}},
+    tags=["Location Pings"],
+)
+def delete_location_ping(ping_id: int):
+    validate_ping_id(ping_id)
+    return ping_handler.delete_ping(ping_id)
+
+
+@app.get(
+    "/api/v1/vehicles/{vehicle_id}/pings",
+    response_model=VehiclePingListResponse,
+    response_description="Vehicle pings returned.",
+    responses={
+        400: {"description": "Invalid query parameters."},
+        404: {"description": "vehicle_id does not exist."},
+    },
+    tags=["Location Pings"],
+)
+def get_vehicle_pings(
+    vehicle_id: int,
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    validate_vehicle_id(vehicle_id)
+    return ping_handler.get_pings_by_vehicle(vehicle_id, limit, offset, from_ts, to_ts)
+
+
+# ---------------------------------------------------------
 # Validation error handler
 # ---------------------------------------------------------
 
@@ -629,6 +740,22 @@ async def validation_exception_handler(
             return JSONResponse(
                 status_code=400, content={"detail": malformed_message}
             )
+
+    # Location Ping validation - rubric section 5.4
+
+    if (
+        path == "/api/v1/location-pings"
+        or path.startswith("/api/v1/location-pings/")
+    ):
+        if any(error.get("loc", [None])[0] == "path" for error in errors):
+            detail = "ping_id must be a positive integer."
+        elif method == "GET":
+            detail = "Invalid query parameter values."
+        elif method == "PUT":
+            detail = "Malformed JSON or empty patch payload."
+        else:
+            detail = "Malformed geometry or invalid JSON."
+        return JSONResponse(status_code=400, content={"detail": detail})
 
     # -----------------------------------------------------
     # Vehicle validation - preserve existing behavior
@@ -792,6 +919,12 @@ def custom_openapi():
 
         # Vehicle rubric does not document HTTP 422.
         if path.startswith("/api/v1/vehicles"):
+            for method_details in methods.values():
+                if isinstance(method_details, dict):
+                    method_details.get("responses", {}).pop("422", None)
+
+        # Location ping rubric does not document HTTP 422.
+        if path.startswith("/api/v1/location-pings"):
             for method_details in methods.values():
                 if isinstance(method_details, dict):
                     method_details.get("responses", {}).pop("422", None)
