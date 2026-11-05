@@ -157,16 +157,43 @@ class VehicleAssignmentIntegrationTests(unittest.TestCase):
         self.assertEqual(result["count"], self.initial_count)
 
     def test_04_post_reference_and_interval_validation(self):
-        self.assert_error("POST", 404, payload=self.make_payload(vehicle_id=999999))
-        self.assert_error("POST", 404, payload=self.make_payload(driver_id=999999))
-        self.assert_error("POST", 422, payload=self.make_payload(vehicle_id=-1))
-        self.assert_error("POST", 422, payload=self.make_payload(driver_id=0))
-        self.assert_error("POST", 422, payload=self.make_payload(assigned_to=BEFORE))
-        self.assert_error("POST", 422, payload=self.make_payload(assigned_to=START))
-        self.assert_error("POST", 422, payload=self.make_payload(assigned_from="invalid"))
-        self.assert_error("POST", 422, payload=self.make_payload(assigned_from=None))
-        self.assert_error("POST", 422, payload={"vehicle_id": self.vehicle_id})
-        self.assert_error("POST", 400, raw_body="{not valid json")
+        self.assert_error(
+            "POST", 404, payload=self.make_payload(vehicle_id=999999),
+            detail="Referenced vehicle_id or driver_id does not exist.",
+        )
+        self.assert_error(
+            "POST", 404, payload=self.make_payload(driver_id=999999),
+            detail="Referenced vehicle_id or driver_id does not exist.",
+        )
+        for invalid in (
+            self.make_payload(vehicle_id=-1),
+            self.make_payload(driver_id=0),
+            self.make_payload(assigned_from=None),
+            {"vehicle_id": self.vehicle_id},
+        ):
+            with self.subTest(invalid=invalid):
+                self.assert_error(
+                    "POST", 400, payload=invalid,
+                    detail="Malformed JSON or invalid payload shape.",
+                )
+        for invalid_timestamp in ("invalid", "1730721600",
+                                  "2026-11-04 12:00:00Z",
+                                  "2026-11-04T12:00:00"):
+            with self.subTest(invalid_timestamp=invalid_timestamp):
+                self.assert_error(
+                    "POST", 422,
+                    payload=self.make_payload(assigned_from=invalid_timestamp),
+                    detail="The assignment time interval is invalid.",
+                )
+        for end in (BEFORE, START):
+            self.assert_error(
+                "POST", 422, payload=self.make_payload(assigned_to=end),
+                detail="The assignment time interval is invalid.",
+            )
+        self.assert_error(
+            "POST", 400, raw_body="{not valid json",
+            detail="Malformed JSON or invalid payload shape.",
+        )
 
     def test_05_list_filter_errors(self):
         for params in (
@@ -188,25 +215,111 @@ class VehicleAssignmentIntegrationTests(unittest.TestCase):
         assignment_id = None
         try:
             assignment_id = self.create_for_test()
-            self.assert_error("PUT", 404, path=f"/{assignment_id}",
-                              payload={"vehicle_id": 999999})
-            self.assert_error("PUT", 404, path=f"/{assignment_id}",
-                              payload={"driver_id": 999999})
-            self.assert_error("PUT", 422, path=f"/{assignment_id}",
-                              payload={"assigned_to": BEFORE})
-            self.assert_error("PUT", 422, path=f"/{assignment_id}",
-                              payload={"assigned_from": END,
-                                       "assigned_to": START})
-            self.assert_error("PUT", 422, path=f"/{assignment_id}",
-                              payload={"assigned_from": None})
-            self.assert_error("PUT", 400, path=f"/{assignment_id}",
-                              raw_body="{broken")
+            for foreign_key in ("vehicle_id", "driver_id"):
+                self.assert_error(
+                    "PUT", 404, path=f"/{assignment_id}",
+                    payload={foreign_key: 999999},
+                    detail="assignment_id or a referenced foreign key does not exist.",
+                )
+            for interval_changes in (
+                {"assigned_to": BEFORE},
+                {"assigned_from": END, "assigned_to": START},
+                {"assigned_to": "2026-11-04 18:00:00Z"},
+            ):
+                self.assert_error(
+                    "PUT", 422, path=f"/{assignment_id}",
+                    payload=interval_changes,
+                    detail="The resulting assignment interval is invalid.",
+                )
+            for invalid_changes in (
+                {"assigned_from": None},
+                {"vehicle_id": None},
+                {"driver_id": None},
+            ):
+                self.assert_error(
+                    "PUT", 400, path=f"/{assignment_id}",
+                    payload=invalid_changes,
+                    detail="Malformed JSON or empty update payload.",
+                )
+            self.assert_error(
+                "PUT", 400, path=f"/{assignment_id}", raw_body="{broken",
+                detail="Malformed JSON or empty update payload.",
+            )
             status, entry = request(path=f"/{assignment_id}")
             self.assertEqual(status, 200)
             self.assertEqual(entry["assigned_from"], START)
             self.assertIsNone(entry["assigned_to"])
         finally:
             self.delete_if_present(assignment_id)
+
+    def test_08_reopen_assignment_and_utc_normalization(self):
+        assignment_id = None
+        try:
+            payload = self.make_payload(
+                assigned_from="2026-11-04T08:00:00-04:00",
+                assigned_to=END,
+            )
+            status, created = request("POST", payload=payload)
+            self.assertEqual(status, 201, created)
+            assignment_id = created["assignment_id"]
+            self.assertEqual(created["assigned_from"], START)
+            self.assertEqual(created["assigned_to"], END)
+            status, reopened = request("PUT", f"/{assignment_id}", {"assigned_to": None})
+            self.assertEqual(status, 200, reopened)
+            self.assertIsNone(reopened["assigned_to"])
+            status, active = request(params={"active": "true", "limit": 1000})
+            self.assertEqual(status, 200)
+            self.assertIn(assignment_id, {item["assignment_id"] for item in active["items"]})
+        finally:
+            self.delete_if_present(assignment_id)
+
+    def test_09_noninteger_and_nonpositive_path_ids(self):
+        for invalid_id in ("not-an-id", "0", "-1"):
+            for method in ("GET", "PUT", "DELETE"):
+                payload = {"assigned_to": END} if method == "PUT" else None
+                with self.subTest(invalid_id=invalid_id, method=method):
+                    self.assert_error(
+                        method, 400, path=f"/{invalid_id}", payload=payload,
+                        detail="assignment_id must be a positive integer.",
+                    )
+
+    def test_10_openapi_documented_responses(self):
+        url = "http://127.0.0.1:8001/openapi.json"
+        with urlopen(url, timeout=10) as response:
+            spec = json.load(response)
+        expected = {
+            ("/api/v1/vehicle-assignments", "post"): {
+                "201": "Vehicle assignment was created successfully.",
+                "400": "Malformed JSON or invalid payload shape.",
+                "404": "Referenced vehicle_id or driver_id does not exist.",
+                "422": "The assignment time interval is invalid.",
+            },
+            ("/api/v1/vehicle-assignments", "get"): {
+                "200": "Vehicle assignment collection returned successfully.",
+                "400": "Invalid query parameter values.",
+            },
+            ("/api/v1/vehicle-assignments/{assignment_id}", "get"): {
+                "200": "Vehicle assignment returned successfully.",
+                "404": "assignment_id does not exist.",
+            },
+            ("/api/v1/vehicle-assignments/{assignment_id}", "put"): {
+                "200": "Vehicle assignment updated successfully.",
+                "400": "Malformed JSON or empty update payload.",
+                "404": "assignment_id or a referenced foreign key does not exist.",
+                "422": "The resulting assignment interval is invalid.",
+            },
+            ("/api/v1/vehicle-assignments/{assignment_id}", "delete"): {
+                "200": "Vehicle assignment deleted successfully.",
+                "404": "assignment_id does not exist.",
+            },
+        }
+        for (path, method), descriptions in expected.items():
+            with self.subTest(path=path, method=method):
+                actual = {
+                    status: response["description"]
+                    for status, response in spec["paths"][path][method]["responses"].items()
+                }
+                self.assertEqual(actual, descriptions)
 
 
 if __name__ == "__main__":

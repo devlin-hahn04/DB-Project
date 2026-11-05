@@ -562,25 +562,73 @@ async def validation_exception_handler(
         for error in errors
     )
 
-    # Assignment response codes: malformed bodies -> 400, invalid fields -> 422.
-    if path.startswith("/api/v1/vehicle-assignments"):
-        path_error = any(error.get("loc", [None])[0] == "path" for error in errors)
+    # -----------------------------------------------------
+    # Vehicle Assignment validation - rubric section 5.7
+    # -----------------------------------------------------
+
+    if (
+        path == "/api/v1/vehicle-assignments"
+        or path.startswith("/api/v1/vehicle-assignments/")
+    ):
+        path_error = any(
+            error.get("loc", [None])[0] == "path" for error in errors
+        )
         if path_error:
-            return JSONResponse(status_code=400, content={"detail": "assignment_id must be a positive integer."})
-        if method == "GET":
-            return JSONResponse(status_code=400, content={"detail": "Invalid query parameter values."})
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "assignment_id must be a positive integer."},
+            )
+
+        if method == "GET" and path == "/api/v1/vehicle-assignments":
+            return JSONResponse(
+                status_code=400,
+                content={"detail": "Invalid query parameter values."},
+            )
+
         malformed_shape = any(
-            error.get("type") in ("json_invalid", "model_attributes_type", "model_type", "dict_type", "list_type")
+            error.get("type") in (
+                "json_invalid", "model_attributes_type", "model_type",
+                "dict_type", "list_type",
+            )
             for error in errors
         )
-        if method == "POST":
+
+        if method in ("POST", "PUT"):
+            is_create = method == "POST"
+            malformed_message = (
+                "Malformed JSON or invalid payload shape."
+                if is_create else "Malformed JSON or empty update payload."
+            )
+            interval_message = (
+                "The assignment time interval is invalid."
+                if is_create else "The resulting assignment interval is invalid."
+            )
+
             if malformed_shape:
-                return JSONResponse(status_code=400, content={"detail": "Malformed JSON or invalid payload shape."})
-            return JSONResponse(status_code=422, content={"detail": "A required field is null or invalid."})
-        if method == "PUT":
-            if malformed_shape:
-                return JSONResponse(status_code=400, content={"detail": "Malformed JSON or empty update payload."})
-            return JSONResponse(status_code=422, content={"detail": "A supplied field is null or invalid."})
+                return JSONResponse(
+                    status_code=400, content={"detail": malformed_message}
+                )
+
+            # Invalid non-null timestamps (including invalid RFC 3339 strings)
+            # use the rubric's interval-specific 422 response.
+            timestamp_error = any(
+                error.get("loc", [None])[-1] in (
+                    "assigned_from", "assigned_to"
+                )
+                and error.get("type") != "missing"
+                and error.get("input") is not None
+                for error in errors
+            )
+            if timestamp_error:
+                return JSONResponse(
+                    status_code=422, content={"detail": interval_message}
+                )
+
+            # Missing/null required fields, invalid IDs and extra fields are
+            # malformed payloads (400), not driver-specific 422 responses.
+            return JSONResponse(
+                status_code=400, content={"detail": malformed_message}
+            )
 
     # -----------------------------------------------------
     # Vehicle validation - preserve existing behavior

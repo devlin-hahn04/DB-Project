@@ -1,5 +1,6 @@
-"""SQL data access for vehicle-to-driver assignments (Issue #20)."""
+"""SQL data access and Pydantic schemas for vehicle assignments (Issue #20)."""
 
+import re
 from datetime import datetime, timezone
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
@@ -9,13 +10,23 @@ from psycopg2.extras import RealDictCursor
 from backend.config.dbconfig import get_db_connection
 
 
-# ---------------------------------------------------------
-# Vehicle Assignment Pydantic schemas and validation
-# ---------------------------------------------------------
+RFC3339_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})"
+)
+
+
+def require_rfc3339_string(value):
+    """Reject non-RFC3339 strings before Pydantic's datetime coercion."""
+    if value is None:
+        return None  # The model/handler rejects null when the field is required.
+    if not isinstance(value, str) or not RFC3339_PATTERN.fullmatch(value):
+        raise ValueError("Timestamp must be a valid RFC 3339 string.")
+    return value
 
 
 def normalize_timestamp(value: datetime | None) -> datetime | None:
-    """Store all timestamps in UTC, matching the legacy TIMESTAMP columns."""
+    """Normalize timezone-aware timestamps to UTC-naive legacy TIMESTAMP columns."""
     if value is None:
         return None
     if value.tzinfo is None or value.utcoffset() is None:
@@ -24,7 +35,17 @@ def normalize_timestamp(value: datetime | None) -> datetime | None:
 
 
 class AssignmentCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "vehicle_id": 1,
+                "driver_id": 1,
+                "assigned_from": "2026-11-05T12:00:00Z",
+                "assigned_to": "2026-11-05T18:00:00Z",
+            }
+        },
+    )
 
     vehicle_id: int = Field(gt=0)
     driver_id: int = Field(gt=0)
@@ -33,10 +54,8 @@ class AssignmentCreate(BaseModel):
 
     @field_validator("assigned_from", "assigned_to", mode="before")
     @classmethod
-    def require_rfc3339_string(cls, value):
-        if value is not None and not isinstance(value, str):
-            raise ValueError("Timestamp must be an RFC 3339 string.")
-        return value
+    def validate_rfc3339_string(cls, value):
+        return require_rfc3339_string(value)
 
     @field_validator("assigned_from", "assigned_to")
     @classmethod
@@ -45,7 +64,14 @@ class AssignmentCreate(BaseModel):
 
 
 class AssignmentUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "assigned_to": "2026-11-05T18:00:00Z"
+            }
+        },
+    )
 
     vehicle_id: int | None = Field(default=None, gt=0)
     driver_id: int | None = Field(default=None, gt=0)
@@ -54,10 +80,8 @@ class AssignmentUpdate(BaseModel):
 
     @field_validator("assigned_from", "assigned_to", mode="before")
     @classmethod
-    def require_rfc3339_string(cls, value):
-        if value is not None and not isinstance(value, str):
-            raise ValueError("Timestamp must be an RFC 3339 string.")
-        return value
+    def validate_rfc3339_string(cls, value):
+        return require_rfc3339_string(value)
 
     @field_validator("assigned_from", "assigned_to")
     @classmethod
@@ -96,44 +120,31 @@ class AssignmentDeleteResponse(BaseModel):
 
 
 class VehicleAssignmentDAO:
-    """Run vehicle assignment SQL using the existing shared connection pool."""
+    """Execute parameterized SQL through the shared connection pool."""
 
     ASSIGNMENT_COLUMNS = """
-        assignment_id,
-        vehicle_id,
-        driver_id,
-        assigned_from,
-        assigned_to
+        assignment_id, vehicle_id, driver_id, assigned_from, assigned_to
     """
 
     def vehicle_exists(self, vehicle_id):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT 1 FROM vehicle WHERE vehicle_id = %s",
-                    (vehicle_id,),
-                )
+                cursor.execute("SELECT 1 FROM vehicle WHERE vehicle_id = %s", (vehicle_id,))
                 return cursor.fetchone() is not None
 
     def driver_exists(self, driver_id):
         with get_db_connection() as conn:
             with conn.cursor() as cursor:
-                cursor.execute(
-                    "SELECT 1 FROM driver WHERE driver_id = %s",
-                    (driver_id,),
-                )
+                cursor.execute("SELECT 1 FROM driver WHERE driver_id = %s", (driver_id,))
                 return cursor.fetchone() is not None
 
     def create_assignment(self, data):
         query = f"""
             INSERT INTO vehicle_assignment (
                 vehicle_id, driver_id, assigned_from, assigned_to
-            )
-            VALUES (
-                %(vehicle_id)s, %(driver_id)s,
-                %(assigned_from)s, %(assigned_to)s
-            )
-            RETURNING {self.ASSIGNMENT_COLUMNS}
+            ) VALUES (
+                %(vehicle_id)s, %(driver_id)s, %(assigned_from)s, %(assigned_to)s
+            ) RETURNING {self.ASSIGNMENT_COLUMNS}
         """
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cursor:
@@ -152,9 +163,7 @@ class VehicleAssignmentDAO:
                 row = cursor.fetchone()
                 return dict(row) if row else None
 
-    def get_assignments(
-        self, limit, offset, vehicle_id=None, driver_id=None, active=None
-    ):
+    def get_assignments(self, limit, offset, vehicle_id=None, driver_id=None, active=None):
         conditions = []
         params = []
 
@@ -165,13 +174,9 @@ class VehicleAssignmentDAO:
             conditions.append("driver_id = %s")
             params.append(driver_id)
         if active is not None:
-            conditions.append(
-                "assigned_to IS NULL" if active else "assigned_to IS NOT NULL"
-            )
+            conditions.append("assigned_to IS NULL" if active else "assigned_to IS NOT NULL")
 
-        where_clause = (
-            " WHERE " + " AND ".join(conditions) if conditions else ""
-        )
+        where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
         query = f"""
             SELECT {self.ASSIGNMENT_COLUMNS}
             FROM vehicle_assignment
@@ -193,7 +198,6 @@ class VehicleAssignmentDAO:
         return items, count
 
     def update_assignment(self, assignment_id, data):
-        # Field names come from the validated update model (never arbitrary input).
         allowed = {"vehicle_id", "driver_id", "assigned_from", "assigned_to"}
         if not data or not set(data).issubset(allowed):
             raise ValueError("At least one valid updatable field is required")
