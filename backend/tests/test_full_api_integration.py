@@ -3,7 +3,7 @@
 
 Run from the project root:
     $env:CARTRACKING_E2E_ALLOW_WRITES = "cartracking_test"
-    python -m unittest discover -s backend/tests -p test_professor_grader.py -v
+    python -m unittest discover -s backend/tests -p test_full_api_integration.py -v
 
 Uses only the isolated backend-test on 127.0.0.1:8001.
 Creates temporary rows and cleans them up.
@@ -25,6 +25,7 @@ D = API + "/drivers"
 V = API + "/vehicles"
 A = API + "/vehicle-assignments"
 P = API + "/location-pings"
+PA = API + "/parking-areas"
 MISSING = 999999999
 START = "2032-05-20T12:00:00Z"
 END = "2032-05-20T13:00:00Z"
@@ -142,6 +143,32 @@ EXPECTED = {
 }
 
 
+# Professor's Parking Area rubric (Section 5.3): 10 additional response codes.
+EXPECTED.update({
+    ("/api/v1/parking-areas", "post"): {
+        "201": "Parking area created successfully.",
+        "400": "Malformed geometry or invalid JSON.",
+    },
+    ("/api/v1/parking-areas", "get"): {
+        "200": "Parking area collection returned.",
+        "400": "Invalid query parameter values.",
+    },
+    ("/api/v1/parking-areas/{parking_area_id}", "get"): {
+        "200": "Parking area returned.",
+        "404": "parking_area_id does not exist.",
+    },
+    ("/api/v1/parking-areas/{parking_area_id}", "put"): {
+        "200": "Parking area updated successfully.",
+        "400": "Malformed JSON or empty patch payload.",
+        "404": "parking_area_id does not exist.",
+    },
+    ("/api/v1/parking-areas/{parking_area_id}", "delete"): {
+        "200": "Parking area deleted.",
+        "404": "parking_area_id does not exist.",
+    },
+})
+
+
 def http(method, url, body=None, params=None, raw=None):
     """Send an HTTP request and return status plus decoded JSON."""
     if params is not None:
@@ -244,7 +271,7 @@ class ProfessorGrader(unittest.TestCase):
                 "is not cartracking_test."
             )
 
-        for url in (D, V, A, P):
+        for url in (D, V, A, P, PA):
             status, response = http("GET", url, params={"limit": 1})
             if status != 200 or not response.get("items"):
                 raise RuntimeError("Populated test database required: " + url)
@@ -258,6 +285,7 @@ class ProfessorGrader(unittest.TestCase):
         )[1]["items"][0]
 
         cls.resources = []
+        cls.initial_parking_count = http("GET", PA, params={"limit": 0})[1]["count"]
 
     @classmethod
     def tearDownClass(cls):
@@ -344,6 +372,72 @@ class ProfessorGrader(unittest.TestCase):
         self.resources.append(f"{P}/{record['ping_id']}")
         return record
 
+    @staticmethod
+    def parking_polygon(lon=100.0, lat=20.0, size=0.01):
+        """Small closed square; deliberately far from Puerto Rico seed data."""
+        return {"type": "Polygon", "coordinates": [[
+            [lon, lat], [lon + size, lat],
+            [lon + size, lat + size], [lon, lat + size], [lon, lat],
+        ]]}
+
+    def new_parking(self, name=None, capacity=30, geom=None, omit_capacity=False):
+        """Create an isolated record with guaranteed unittest cleanup."""
+        payload = {
+            "name": name or ("Professor Parking " + uuid.uuid4().hex),
+            "geom": geom if geom is not None else self.parking_polygon(),
+        }
+        if not omit_capacity:
+            payload["capacity"] = capacity
+        created = self.call("POST", PA, 201, payload)
+        url = f"{PA}/{created['parking_area_id']}"
+        self.addCleanup(self.remove_parking, url)
+        return created
+
+    def remove_parking(self, url):
+        """Fail the test if a temporary parking area cannot be removed."""
+        status, payload = http("DELETE", url)
+        self.assertIn(status, (200, 404), f"Cleanup failed {url}: {payload}")
+
+    
+    def assert_polygon_equal(self, actual, expected):
+        """
+        Compare GeoJSON Polygon coordinates numerically,
+        allowing tiny floating-point representation differences.
+
+        Still checks:
+        - Geometry type
+        - Number of rings
+        - Number of positions
+        - Longitude and latitude values
+        """
+        self.assertEqual(actual["type"], "Polygon")
+        self.assertEqual(expected["type"], "Polygon")
+
+        actual_rings = actual["coordinates"]
+        expected_rings = expected["coordinates"]
+
+        self.assertEqual(len(actual_rings), len(expected_rings))
+
+        for actual_ring, expected_ring in zip(
+            actual_rings, expected_rings
+        ):
+            self.assertEqual(len(actual_ring), len(expected_ring))
+
+            for actual_point, expected_point in zip(
+                actual_ring, expected_ring
+            ):
+                self.assertEqual(len(actual_point), 2)
+                self.assertEqual(len(expected_point), 2)
+
+                for actual_value, expected_value in zip(
+                    actual_point, expected_point
+                ):
+                    self.assertAlmostEqual(
+                        actual_value,
+                        expected_value,
+                        places=10,
+                    )
+
     # -------------------------------------------------------
     # Rubric and response structures
     # -------------------------------------------------------
@@ -351,7 +445,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 64)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 75)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -364,7 +458,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_02_all_list_shapes_and_zero_limit(self):
-        for url in (D, V, A, P):
+        for url in (D, V, A, P, PA):
             with self.subTest(url=url):
                 response = self.call(
                     "GET", url, 200,
@@ -960,7 +1054,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(status, 404)
 
     def test_19_invalid_query_and_path_boundaries(self):
-        for url in (D, V, A, P):
+        for url in (D, V, A, P, PA):
             with self.subTest(url=url):
                 self.call(
                     "GET", url, 400,
@@ -986,13 +1080,298 @@ class ProfessorGrader(unittest.TestCase):
     def test_20_cleanup_and_preservation(self):
         self.cleanup()
 
-        for url in (D, V, A, P):
+        for url in (D, V, A, P, PA):
             response = self.call(
                 "GET", url, 200,
                 params={"limit": 0}
             )
 
             self.assertGreater(response["count"], 0)
+
+
+    # -------------------------------------------------------
+    # Parking Area: professor-style, adversarial end-to-end cases
+    # -------------------------------------------------------
+
+    def test_21_parking_create_get_exact_contract(self):
+        item = self.new_parking()
+        url = f"{PA}/{item['parking_area_id']}"
+        self.assertEqual(set(item), {
+            "parking_area_id", "name", "capacity", "geom", "created_at"
+        })
+        self.assertIsInstance(item["parking_area_id"], int)
+        self.assertGreater(item["parking_area_id"], 0)
+        self.assertEqual(item["capacity"], 30)
+        self.assertEqual(item["geom"], self.parking_polygon())
+        self.assertTrue(item["created_at"].endswith("Z"))
+        self.assertEqual(self.call("GET", url, 200), item)
+
+    def test_22_parking_capacity_omitted_null_and_zero(self):
+        for kind in ("omitted", "null", "zero"):
+            with self.subTest(kind=kind):
+                item = self.new_parking(
+                    name="Capacity " + uuid.uuid4().hex,
+                    omit_capacity=(kind == "omitted"),
+                    capacity=None if kind == "null" else 0,
+                )
+                self.assertEqual(
+                    item["capacity"], 0 if kind == "zero" else None
+                )
+                fetched = self.call("GET", f"{PA}/{item['parking_area_id']}", 200)
+                self.assertEqual(fetched["capacity"], item["capacity"])
+
+    def test_23_parking_create_invalid_payload_matrix(self):
+        polygon = self.parking_polygon()
+        base = {"name": "Rejected", "capacity": 10, "geom": polygon}
+        cases = {
+            "missing name": {"capacity": 10, "geom": polygon},
+            "null name": {**base, "name": None},
+            "empty name": {**base, "name": ""},
+            "whitespace name": {**base, "name": "  "},
+            "negative capacity": {**base, "capacity": -1},
+            "fractional capacity": {**base, "capacity": 1.5},
+            "missing geometry": {"name": "Rejected", "capacity": 10},
+            "null geometry": {**base, "geom": None},
+            "point instead polygon": {**base, "geom": point()},
+            "empty coordinates": {**base, "geom": {"type": "Polygon", "coordinates": []}},
+            "unclosed ring": {**base, "geom": {"type": "Polygon", "coordinates": [[
+                [100, 20], [100.01, 20], [100.01, 20.01], [100, 20.01]
+            ]]}},
+            "too few ring positions": {**base, "geom": {"type": "Polygon", "coordinates": [[
+                [100, 20], [100.01, 20], [100, 20],
+            ]]}},
+            "longitude out of range": {**base, "geom": self.parking_polygon(181, 20)},
+            "latitude out of range": {**base, "geom": self.parking_polygon(100, 91)},
+            "three dimensional coordinate": {**base, "geom": {"type": "Polygon", "coordinates": [[
+                [100, 20, 2], [100.01, 20], [100.01, 20.01],
+                [100, 20.01], [100, 20, 2]
+            ]]}},
+            "unexpected top-level field": {**base, "admin": True},
+            "unexpected nested field": {**base, "geom": {**polygon, "crs": "wrong"}},
+        }
+        before = self.call("GET", PA, 200, params={"limit": 0})["count"]
+        for label, body in cases.items():
+            with self.subTest(label=label):
+                self.call("POST", PA, 400, body,
+                          detail="Malformed geometry or invalid JSON.")
+        self.call("POST", PA, 400, raw="{bad JSON",
+                  detail="Malformed geometry or invalid JSON.")
+        after = self.call("GET", PA, 200, params={"limit": 0})["count"]
+        self.assertEqual(after, before, "Invalid POST changed parking_area count")
+
+    def test_24_parking_invalid_topology_rejected(self):
+        # Closed rings may still be invalid (self intersections or holes outside shell).
+        invalids = {
+            "bow tie": {"type": "Polygon", "coordinates": [[
+                [100, 20], [100.02, 20.02], [100, 20.02],
+                [100.02, 20], [100, 20]
+            ]]},
+            "collinear ring": {"type": "Polygon", "coordinates": [[
+                [100, 20], [100.01, 20], [100.02, 20],
+                [100.03, 20], [100, 20]
+            ]]},
+            "hole outside shell": {"type": "Polygon", "coordinates": [
+                self.parking_polygon()["coordinates"][0],
+                self.parking_polygon(101, 21)["coordinates"][0],
+            ]},
+        }
+        for label, geom in invalids.items():
+            with self.subTest(topology=label):
+                self.call("POST", PA, 400, {
+                    "name": "Bad Topology", "capacity": 1, "geom": geom
+                }, detail="Malformed geometry or invalid JSON.")
+
+    def test_25_parking_partial_full_updates_and_timestamp(self):
+        item = self.new_parking()
+        url = f"{PA}/{item['parking_area_id']}"
+        partial = self.call("PUT", url, 200, {"capacity": 0})
+        self.assertEqual(partial["capacity"], 0)
+        self.assertEqual(partial["name"], item["name"])
+        self.assertEqual(partial["geom"], item["geom"])
+        self.assertEqual(partial["created_at"], item["created_at"])
+        new_geom = self.parking_polygon(102, 22)
+        new_name = "Updated " + uuid.uuid4().hex
+        full = self.call("PUT", url, 200, {
+            "name": new_name, "capacity": 77, "geom": new_geom
+        })
+        self.assertEqual(full["name"], new_name)
+        self.assertEqual(full["capacity"], 77)
+        self.assertEqual(full["geom"], new_geom)
+        self.assertEqual(full["created_at"], item["created_at"])
+        self.assertEqual(self.call("GET", url, 200), full)
+        cleared = self.call("PUT", url, 200, {"capacity": None})
+        self.assertIsNone(cleared["capacity"])
+        self.assertEqual(cleared["geom"], new_geom)
+
+    def test_26_parking_update_invalid_atomicity(self):
+        item = self.new_parking()
+        url = f"{PA}/{item['parking_area_id']}"
+        bowtie = {"type": "Polygon", "coordinates": [[
+            [100, 20], [100.02, 20.02], [100, 20.02],
+            [100.02, 20], [100, 20]
+        ]]}
+        invalids = [
+            {}, {"name": None}, {"name": "  "},
+            {"capacity": -1}, {"capacity": 2.3},
+            {"geom": None}, {"geom": bowtie},
+            {"name": "DO NOT SAVE", "capacity": 90, "geom": bowtie},
+            {"invalid_field": 1},
+        ]
+        for change in invalids:
+            with self.subTest(change=change):
+                self.call("PUT", url, 400, change,
+                          detail="Malformed JSON or empty patch payload.")
+                self.assertEqual(self.call("GET", url, 200), item)
+        self.call("PUT", url, 400, raw="{not JSON",
+                  detail="Malformed JSON or empty patch payload.")
+        self.assertEqual(self.call("GET", url, 200), item)
+
+    def test_27_parking_name_filter_case_and_substring(self):
+        marker = "ProfessorPark" + uuid.uuid4().hex[:12]
+        created = self.new_parking(name="  " + marker + " Alpha  ")
+        self.assertEqual(created["name"], marker + " Alpha")
+        for substring in (marker, marker.lower(), "ALPHA"):
+            with self.subTest(substring=substring):
+                page = self.call("GET", PA, 200, params={
+                    "name": substring, "limit": 20, "offset": 0
+                })
+                self.assertEqual(page["count"], 1)
+                self.assertEqual(page["items"][0]["parking_area_id"],
+                                 created["parking_area_id"])
+                self.assertNotIn("geom", page["items"][0])
+
+    def test_28_parking_combined_filters_are_intersection(self):
+        token = "FilterTest" + uuid.uuid4().hex[:12]
+        a = self.new_parking(name=token + " A", geom=self.parking_polygon(100, 20))
+        b = self.new_parking(name=token + " B", geom=self.parking_polygon(102, 22))
+        c = self.new_parking(name="Other " + uuid.uuid4().hex,
+                             geom=self.parking_polygon(100, 20.03))
+        match_bbox = "99.99,19.99,100.02,20.02"
+        named = self.call("GET", PA, 200, params={"name": token, "limit": 20})
+        self.assertEqual(named["count"], 2)
+        self.assertEqual({x["parking_area_id"] for x in named["items"]},
+                         {a["parking_area_id"], b["parking_area_id"]})
+        boxed = self.call("GET", PA, 200, params={"bbox": match_bbox, "limit": 1000})
+        self.assertIn(a["parking_area_id"], {x["parking_area_id"] for x in boxed["items"]})
+        combined = self.call("GET", PA, 200, params={
+            "name": token, "bbox": match_bbox, "limit": 20
+        })
+        self.assertEqual(combined["count"], 1)
+        self.assertEqual(combined["items"][0]["parking_area_id"],
+                         a["parking_area_id"])
+        excluded = self.call("GET", PA, 200, params={
+            "name": token, "bbox": "-100,1,-99,2", "limit": 20
+        })
+        self.assertEqual(excluded["count"], 0)
+        self.assertEqual(excluded["items"], [])
+
+    def test_29_parking_bbox_boundary_intersection(self):
+        marker = "Edge" + uuid.uuid4().hex[:12]
+        item = self.new_parking(name=marker, geom=self.parking_polygon(100, 20))
+        touching = self.call("GET", PA, 200, params={
+            "name": marker, "bbox": "100.01,20.001,100.02,20.009"
+        })
+        self.assertEqual(touching["count"], 1,
+                         "ST_Intersects should include touching boundaries")
+        self.assertEqual(touching["items"][0]["parking_area_id"],
+                         item["parking_area_id"])
+        not_touching = self.call("GET", PA, 200, params={
+            "name": marker, "bbox": "100.011,20.001,100.02,20.009"
+        })
+        self.assertEqual(not_touching["count"], 0)
+
+    def test_30_parking_invalid_query_matrix(self):
+        params_cases = [
+            {"limit": -1}, {"offset": -1},
+            {"limit": "abc"}, {"offset": "2.5"},
+            {"limit": "1e2"}, {"limit": "-0"},
+            {"bbox": ""}, {"bbox": "100,20,101"},
+            {"bbox": "x,20,101,21"}, {"bbox": "nan,20,101,21"},
+            {"bbox": "100,20,inf,21"}, {"bbox": "101,20,100,21"},
+            {"bbox": "100,21,101,20"},
+            {"bbox": "100,20,100,21"},
+            {"bbox": "180.1,20,180.5,21"},
+            {"bbox": "100,-91,101,-90"},
+        ]
+        for params in params_cases:
+            with self.subTest(params=params):
+                self.call("GET", PA, 400, params=params,
+                          detail="Invalid query parameter values.")
+
+    def test_31_parking_pagination_consistency_and_zero_limit(self):
+        marker = "Page" + uuid.uuid4().hex[:12]
+        items = [self.new_parking(name=marker + f" {i}") for i in range(3)]
+        expected = sorted(x["parking_area_id"] for x in items)
+        pages = [self.call("GET", PA, 200, params={
+            "name": marker, "limit": 1, "offset": i
+        }) for i in range(4)]
+        self.assertEqual([p["count"] for p in pages], [3] * 4)
+        self.assertEqual([p["items"][0]["parking_area_id"] for p in pages[:3]], expected)
+        self.assertEqual(pages[3]["items"], [])
+        zero = self.call("GET", PA, 200, params={"name": marker, "limit": 0})
+        self.assertEqual(zero["items"], [])
+        self.assertEqual(zero["count"], 3)
+        self.assertEqual(zero["limit"], 0)
+
+    def test_32_parking_ids_nonexistent_and_delete_contract(self):
+        for bad_id in ("0", "-1", "abc", "1.3"):
+            for method in ("GET", "DELETE"):
+                with self.subTest(method=method, id=bad_id):
+                    self.call(method, f"{PA}/{bad_id}", 400,
+                              detail="parking_area_id must be a positive integer.")
+        for method, body in (("GET", None), ("PUT", {"capacity": 1}),
+                             ("DELETE", None)):
+            with self.subTest(method=method):
+                self.call(method, f"{PA}/{MISSING}", 404, body,
+                          detail="parking_area_id does not exist.")
+        item = self.new_parking()
+        url = f"{PA}/{item['parking_area_id']}"
+        deleted = self.call("DELETE", url, 200)
+        self.assertEqual(deleted, {
+            "message": "Parking area deleted successfully.",
+            "parking_area_id": item["parking_area_id"],
+        })
+        self.call("GET", url, 404, detail="parking_area_id does not exist.")
+        self.call("DELETE", url, 404, detail="parking_area_id does not exist.")
+
+    def test_33_parking_geometry_with_valid_hole_roundtrips(self):
+        # A valid exterior and inner ring, both closed and strictly inside.
+        exterior = self.parking_polygon(100, 20, 0.1)["coordinates"][0]
+        hole = list(reversed(self.parking_polygon(100.02, 20.02, 0.02)["coordinates"][0]))
+        geom = {"type": "Polygon", "coordinates": [exterior, hole]}
+        item = self.new_parking(geom=geom)
+        self.assert_polygon_equal(item["geom"], geom)
+        self.assert_polygon_equal(
+            self.call(
+                "GET",
+                f"{PA}/{item['parking_area_id']}",
+                200,
+            )["geom"],
+            geom,
+        )
+
+    def test_34_parking_sql_injection_like_name_is_data(self):
+        # This should be treated as a name substring, never as SQL syntax.
+        suspicious = "' OR 1=1 -- " + uuid.uuid4().hex
+        result = self.call("GET", PA, 200, params={"name": suspicious, "limit": 1})
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["items"], [])
+        self.assertGreater(self.call("GET", PA, 200, params={"limit": 0})["count"], 0)
+
+    def test_35_parking_seed_records_unchanged_after_new_records(self):
+        # Snapshot one of the ETL records, then exercise a separate record.
+        baseline = self.call("GET", PA, 200, params={"limit": 1})["items"][0]
+        url = f"{PA}/{baseline['parking_area_id']}"
+        original = self.call("GET", url, 200)
+        item = self.new_parking()
+        self.call("PUT", f"{PA}/{item['parking_area_id']}", 200, {"capacity": 87})
+        self.assertEqual(self.call("GET", url, 200), original)
+
+    def test_99_parking_count_preserved_at_end(self):
+        # All per-test addCleanup handlers should already have run.
+        current = self.call("GET", PA, 200, params={"limit": 0})
+        self.assertEqual(current["count"], self.initial_parking_count,
+                         "Parking Area records leaked or were unexpectedly deleted")
 
 
 if __name__ == "__main__":
