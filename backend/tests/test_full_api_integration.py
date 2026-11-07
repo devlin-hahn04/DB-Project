@@ -26,6 +26,7 @@ V = API + "/vehicles"
 A = API + "/vehicle-assignments"
 P = API + "/location-pings"
 PA = API + "/parking-areas"
+T = API + "/trips"
 MISSING = 999999999
 START = "2032-05-20T12:00:00Z"
 END = "2032-05-20T13:00:00Z"
@@ -141,6 +142,39 @@ EXPECTED = {
         "404": "vehicle_id does not exist.",
     },
 }
+
+
+# Trips REST resource: exact documented response contract.
+EXPECTED.update({
+    ("/api/v1/trips", "post"): {
+        "201": "Trip created successfully.",
+        "400": "Malformed geometry or invalid JSON.",
+        "404": "vehicle_id does not exist.",
+    },
+    ("/api/v1/trips", "get"): {
+        "200": "Trip collection returned.",
+        "400": "Invalid query parameter values.",
+    },
+    ("/api/v1/trips/{trip_id}", "get"): {
+        "200": "Trip returned successfully.",
+        "404": "trip_id does not exist.",
+    },
+    ("/api/v1/trips/{trip_id}", "put"): {
+        "200": "Trip updated successfully.",
+        "400": "Malformed JSON or empty patch payload.",
+        "404": "trip_id or referenced vehicle_id does not exist.",
+        "422": "Validation failed.",
+    },
+    ("/api/v1/trips/{trip_id}", "delete"): {
+        "200": "Trip deleted.",
+        "404": "trip_id does not exist.",
+    },
+    ("/api/v1/vehicles/{vehicle_id}/trips", "get"): {
+        "200": "Vehicle trips returned.",
+        "400": "Invalid query parameters.",
+        "404": "vehicle_id does not exist.",
+    },
+})
 
 
 # Professor's Parking Area rubric (Section 5.3): 10 additional response codes.
@@ -271,7 +305,7 @@ class ProfessorGrader(unittest.TestCase):
                 "is not cartracking_test."
             )
 
-        for url in (D, V, A, P, PA):
+        for url in (D, V, A, P, PA, T):
             status, response = http("GET", url, params={"limit": 1})
             if status != 200 or not response.get("items"):
                 raise RuntimeError("Populated test database required: " + url)
@@ -284,8 +318,13 @@ class ProfessorGrader(unittest.TestCase):
             "GET", D, params={"limit": 1}
         )[1]["items"][0]
 
+        cls.seed_trip = http(
+            "GET", T, params={"limit": 1}
+        )[1]["items"][0]
+
         cls.resources = []
         cls.initial_parking_count = http("GET", PA, params={"limit": 0})[1]["count"]
+        cls.initial_trip_count = http("GET", T, params={"limit": 0})[1]["count"]
 
     @classmethod
     def tearDownClass(cls):
@@ -372,6 +411,23 @@ class ProfessorGrader(unittest.TestCase):
         self.resources.append(f"{P}/{record['ping_id']}")
         return record
 
+    def new_trip(
+        self, vehicle_id=None, start_ts=START, end_ts=END,
+        start_geom=None, end_geom=None, distance_km=6.7
+    ):
+        """Create a temporary Trip and register it for reverse-order cleanup."""
+        payload = {
+            "vehicle_id": vehicle_id or self.seed_vehicle["vehicle_id"],
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "start_geom": start_geom if start_geom is not None else point(-65.51, 18.41),
+            "end_geom": end_geom if end_geom is not None else point(-65.49, 18.42),
+            "distance_km": distance_km,
+        }
+        record = self.call("POST", T, 201, payload)
+        self.resources.append(f"{T}/{record['trip_id']}")
+        return record
+
     @staticmethod
     def parking_polygon(lon=100.0, lat=20.0, size=0.01):
         """Small closed square; deliberately far from Puerto Rico seed data."""
@@ -445,7 +501,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 75)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 91)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -458,7 +514,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_02_all_list_shapes_and_zero_limit(self):
-        for url in (D, V, A, P, PA):
+        for url in (D, V, A, P, PA, T):
             with self.subTest(url=url):
                 response = self.call(
                     "GET", url, 200,
@@ -1054,7 +1110,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(status, 404)
 
     def test_19_invalid_query_and_path_boundaries(self):
-        for url in (D, V, A, P, PA):
+        for url in (D, V, A, P, PA, T):
             with self.subTest(url=url):
                 self.call(
                     "GET", url, 400,
@@ -1080,7 +1136,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_20_cleanup_and_preservation(self):
         self.cleanup()
 
-        for url in (D, V, A, P, PA):
+        for url in (D, V, A, P, PA, T):
             response = self.call(
                 "GET", url, 200,
                 params={"limit": 0}
@@ -1366,6 +1422,425 @@ class ProfessorGrader(unittest.TestCase):
         item = self.new_parking()
         self.call("PUT", f"{PA}/{item['parking_area_id']}", 200, {"capacity": 87})
         self.assertEqual(self.call("GET", url, 200), original)
+
+    # -------------------------------------------------------
+    # Trips: professor-style, adversarial end-to-end cases
+    # -------------------------------------------------------
+
+    def test_36_trip_create_get_exact_contract_and_geojson(self):
+        vehicle = self.new_vehicle()
+        start = point(-65.5123456789, 18.4123456789)
+        end = point(-65.4987654321, 18.4234567891)
+        payload = {
+            "vehicle_id": vehicle["vehicle_id"],
+            "start_ts": "2032-05-20T08:00:00-04:00",
+            "end_ts": "2032-05-20T08:45:00-04:00",
+            "start_geom": start,
+            "end_geom": end,
+            "distance_km": 6.7,
+        }
+
+        created = self.call("POST", T, 201, payload)
+        self.resources.append(f"{T}/{created['trip_id']}")
+        self.assertEqual(set(created), {
+            "trip_id", "vehicle_id", "start_ts", "end_ts",
+            "start_geom", "end_geom", "distance_km",
+        })
+        self.assertIsInstance(created["trip_id"], int)
+        self.assertGreater(created["trip_id"], 0)
+        self.assertEqual(created["vehicle_id"], vehicle["vehicle_id"])
+        self.assertEqual(created["start_ts"], "2032-05-20T12:00:00Z")
+        self.assertEqual(created["end_ts"], "2032-05-20T12:45:00Z")
+        # Verify GeoJSON structure and coordinate precision.
+        for actual, expected in (
+            (created["start_geom"], start),
+            (created["end_geom"], end),
+        ):
+            self.assertEqual(set(actual), {"type", "coordinates"})
+            self.assertEqual(actual["type"], "Point")
+            self.assertEqual(len(actual["coordinates"]), 2)
+
+            for actual_coordinate, expected_coordinate in zip(
+                actual["coordinates"], expected["coordinates"]
+            ):
+                self.assertAlmostEqual(
+                    actual_coordinate,
+                    expected_coordinate,
+                    delta=5e-10,
+                )
+        self.assertEqual(created["distance_km"], 6.7)
+
+        fetched = self.call("GET", f"{T}/{created['trip_id']}", 200)
+        self.assertEqual(fetched, created)
+
+    def test_37_trip_optional_values_zero_and_null_roundtrip(self):
+        vehicle_id = self.seed_vehicle["vehicle_id"]
+
+        zero = self.call("POST", T, 201, {
+            "vehicle_id": vehicle_id,
+            "start_ts": START,
+            "end_ts": END,
+            "start_geom": point(-67.15, 18.205),
+            "end_geom": point(-67.14, 18.21),
+            "distance_km": 0,
+        })
+        self.resources.append(f"{T}/{zero['trip_id']}")
+        self.assertEqual(zero["distance_km"], 0)
+        self.assertEqual(zero["start_geom"], point(-67.15, 18.205))
+        self.assertEqual(zero["end_geom"], point(-67.14, 18.21))
+
+        nulls = self.call("POST", T, 201, {
+            "vehicle_id": vehicle_id,
+            "start_ts": "2032-05-21T12:00:00Z",
+            "end_ts": "2032-05-21T12:30:00Z",
+            "start_geom": None,
+            "end_geom": None,
+            "distance_km": None,
+        })
+        self.resources.append(f"{T}/{nulls['trip_id']}")
+        self.assertIsNone(nulls["start_geom"])
+        self.assertIsNone(nulls["end_geom"])
+        self.assertIsNone(nulls["distance_km"])
+        self.assertEqual(
+            self.call("GET", f"{T}/{nulls['trip_id']}", 200), nulls
+        )
+
+    def test_38_trip_create_invalid_payload_matrix_is_atomic(self):
+        vehicle_id = self.seed_vehicle["vehicle_id"]
+        valid = {
+            "vehicle_id": vehicle_id,
+            "start_ts": START,
+            "end_ts": END,
+            "start_geom": point(),
+            "end_geom": point(-65.4, 18.5),
+            "distance_km": 1.0,
+        }
+        invalid = {
+            "missing vehicle_id": {k: v for k, v in valid.items() if k != "vehicle_id"},
+            "missing start timestamp": {k: v for k, v in valid.items() if k != "start_ts"},
+            "missing end timestamp": {k: v for k, v in valid.items() if k != "end_ts"},
+            "null vehicle id": {**valid, "vehicle_id": None},
+            "zero vehicle id": {**valid, "vehicle_id": 0},
+            "invalid start timestamp": {**valid, "start_ts": "not-a-date"},
+            "impossible calendar date": {**valid, "start_ts": "2032-02-30T12:00:00Z"},
+            "end equals start": {**valid, "end_ts": START},
+            "end before start": {**valid, "start_ts": END, "end_ts": START},
+            "negative distance": {**valid, "distance_km": -0.01},
+            "infinite distance": {**valid, "distance_km": float("inf")},
+            "NaN distance": {**valid, "distance_km": float("nan")},
+            "longitude above range": {**valid, "start_geom": point(180.000001, 18)},
+            "longitude below range": {**valid, "start_geom": point(-180.000001, 18)},
+            "latitude above range": {**valid, "start_geom": point(-65, 90.000001)},
+            "latitude below range": {**valid, "start_geom": point(-65, -90.000001)},
+            "wrong geometry type": {**valid, "start_geom": {"type": "LineString", "coordinates": [[-65, 18], [-64, 19]]}},
+            "three-dimensional point": {**valid, "start_geom": {"type": "Point", "coordinates": [-65, 18, 5]}},
+            "one coordinate only": {**valid, "start_geom": {"type": "Point", "coordinates": [-65]}},
+            "boolean coordinate": {**valid, "start_geom": {"type": "Point", "coordinates": [True, 18]}},
+            "unexpected nested geometry field": {**valid, "start_geom": {**point(), "crs": "EPSG:4326"}},
+            "unexpected top-level field": {**valid, "admin": True},
+        }
+
+        before = self.call("GET", T, 200, params={"limit": 0})["count"]
+        for label, payload in invalid.items():
+            with self.subTest(case=label):
+                self.call(
+                    "POST", T, 400, payload,
+                    detail="Malformed geometry or invalid JSON.",
+                )
+
+        self.call(
+            "POST", T, 400, raw="{broken JSON",
+            detail="Malformed geometry or invalid JSON.",
+        )
+        self.call(
+            "POST", T, 404,
+            {**valid, "vehicle_id": MISSING},
+            detail="vehicle_id does not exist.",
+        )
+        after = self.call("GET", T, 200, params={"limit": 0})["count"]
+        self.assertEqual(after, before, "Rejected Trip POST changed the Trip table")
+
+    def test_39_trip_update_partial_full_and_persistence(self):
+        vehicle = self.new_vehicle()
+        trip = self.new_trip(vehicle_id=vehicle["vehicle_id"])
+        url = f"{T}/{trip['trip_id']}"
+
+        partial = self.call("PUT", url, 200, {"distance_km": 0})
+        self.assertEqual(partial["distance_km"], 0)
+        self.assertEqual(partial["vehicle_id"], trip["vehicle_id"])
+        self.assertEqual(partial["start_ts"], trip["start_ts"])
+        self.assertEqual(partial["end_ts"], trip["end_ts"])
+        self.assertEqual(partial["start_geom"], trip["start_geom"])
+        self.assertEqual(partial["end_geom"], trip["end_geom"])
+
+        changed_start = point(-66.1, 19.1)
+        changed_end = point(-66.0, 19.2)
+        full = self.call("PUT", url, 200, {
+            "start_ts": "2032-05-20T12:05:00Z",
+            "end_ts": "2032-05-20T13:05:00Z",
+            "start_geom": changed_start,
+            "end_geom": changed_end,
+            "distance_km": 12.25,
+        })
+        self.assertEqual(full["start_ts"], "2032-05-20T12:05:00Z")
+        self.assertEqual(full["end_ts"], "2032-05-20T13:05:00Z")
+        self.assertEqual(full["start_geom"], changed_start)
+        self.assertEqual(full["end_geom"], changed_end)
+        self.assertEqual(full["distance_km"], 12.25)
+        self.assertEqual(self.call("GET", url, 200), full)
+
+        cleared = self.call("PUT", url, 200, {
+            "start_geom": None,
+            "end_geom": None,
+            "distance_km": None,
+        })
+        self.assertIsNone(cleared["start_geom"])
+        self.assertIsNone(cleared["end_geom"])
+        self.assertIsNone(cleared["distance_km"])
+        self.assertEqual(self.call("GET", url, 200), cleared)
+
+    def test_40_trip_invalid_updates_are_atomic(self):
+        trip = self.new_trip()
+        url = f"{T}/{trip['trip_id']}"
+        before = self.call("GET", url, 200)
+
+        invalid_updates = {
+            "empty patch": ({}, 400, "Malformed JSON or empty patch payload."),
+            "negative distance": ({"distance_km": -1}, 400, "Malformed JSON or empty patch payload."),
+            "infinite distance": ({"distance_km": float("inf")}, 400, "Malformed JSON or empty patch payload."),
+            "null vehicle id": ({"vehicle_id": None}, 400, "Malformed JSON or empty patch payload."),
+            "null start timestamp": ({"start_ts": None}, 400, "Malformed JSON or empty patch payload."),
+            "null end timestamp": ({"end_ts": None}, 400, "Malformed JSON or empty patch payload."),
+            "invalid timestamp": ({"end_ts": "not-a-date"}, 400, "Malformed JSON or empty patch payload."),
+            "invalid geometry": ({"start_geom": point(181, 18)}, 400, "Malformed JSON or empty patch payload."),
+            "wrong geometry type": ({"end_geom": {"type": "LineString", "coordinates": []}}, 400, "Malformed JSON or empty patch payload."),
+            "unknown field": ({"not_a_trip_column": 1}, 400, "Malformed JSON or empty patch payload."),
+        }
+
+        for label, (changes, expected, detail) in invalid_updates.items():
+            with self.subTest(case=label):
+                self.call("PUT", url, expected, changes, detail=detail)
+                self.assertEqual(
+                    self.call("GET", url, 200), before,
+                    f"Invalid update mutated Trip: {label}",
+                )
+
+        self.call(
+            "PUT", url, 422, {"end_ts": before["start_ts"]},
+            detail="Validation failed.",
+        )
+        self.assertEqual(self.call("GET", url, 200), before)
+
+        self.call(
+            "PUT", url, 422, {"start_ts": before["end_ts"]},
+            detail="Validation failed.",
+        )
+        self.assertEqual(self.call("GET", url, 200), before)
+
+        self.call(
+            "PUT", url, 404, {"vehicle_id": MISSING},
+            detail="trip_id or referenced vehicle_id does not exist.",
+        )
+        self.assertEqual(self.call("GET", url, 200), before)
+
+        self.call(
+            "PUT", f"{T}/{MISSING}", 404, {"distance_km": 1},
+            detail="trip_id or referenced vehicle_id does not exist.",
+        )
+
+    def test_41_trip_pagination_and_start_timestamp_filters(self):
+        vehicle = self.new_vehicle()
+        vehicle_id = vehicle["vehicle_id"]
+        trips = [
+            self.new_trip(vehicle_id, "2032-05-20T12:00:00Z", "2032-05-20T12:30:00Z"),
+            self.new_trip(vehicle_id, "2032-05-20T13:00:00Z", "2032-05-20T13:30:00Z"),
+            self.new_trip(vehicle_id, "2032-05-20T14:00:00Z", "2032-05-20T14:30:00Z"),
+        ]
+        ids = [item["trip_id"] for item in trips]
+
+        first = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "limit": 2, "offset": 0,
+        })
+        second = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "limit": 2, "offset": 2,
+        })
+        beyond = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "limit": 2, "offset": 20,
+        })
+        self.assertEqual(first["count"], 3)
+        self.assertEqual(second["count"], 3)
+        self.assertEqual([x["trip_id"] for x in first["items"]], ids[:2])
+        self.assertEqual([x["trip_id"] for x in second["items"]], ids[2:])
+        self.assertEqual(beyond["items"], [])
+        self.assertEqual(beyond["count"], 3)
+        self.assertEqual(first["limit"], 2)
+        self.assertEqual(first["offset"], 0)
+        self.assertEqual(second["offset"], 2)
+        self.assertTrue(all(set(item) == {
+            "trip_id", "vehicle_id", "start_ts", "end_ts", "distance_km"
+        } for item in first["items"] + second["items"]))
+
+        zero = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "limit": 0, "offset": 0,
+        })
+        self.assertEqual(zero["items"], [])
+        self.assertEqual(zero["count"], 3)
+
+        # The current Trip API defines from_ts/to_ts against start_ts inclusively.
+        lower = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "from_ts": "2032-05-20T13:00:00Z",
+            "limit": 10,
+        })
+        upper = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id, "to_ts": "2032-05-20T13:00:00Z",
+            "limit": 10,
+        })
+        exact = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id,
+            "from_ts": "2032-05-20T13:00:00Z",
+            "to_ts": "2032-05-20T13:00:00Z",
+            "limit": 10,
+        })
+        self.assertEqual({x["trip_id"] for x in lower["items"]}, set(ids[1:]))
+        self.assertEqual({x["trip_id"] for x in upper["items"]}, set(ids[:2]))
+        self.assertEqual([x["trip_id"] for x in exact["items"]], [ids[1]])
+        self.assertEqual(exact["count"], 1)
+
+        combined = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id,
+            "from_ts": "2032-05-20T12:30:00Z",
+            "to_ts": "2032-05-20T14:00:00Z",
+            "limit": 10,
+        })
+        self.assertEqual({x["trip_id"] for x in combined["items"]}, set(ids[1:]))
+        self.assertEqual(combined["count"], 2)
+
+    def test_42_trip_vehicle_history_shape_order_and_filters(self):
+        vehicle = self.new_vehicle()
+        vehicle_id = vehicle["vehicle_id"]
+        # Insert in deliberately non-chronological timestamp order. The endpoint
+        # currently promises stable trip_id ordering, not timestamp ordering.
+        later = self.new_trip(
+            vehicle_id, "2032-05-20T14:00:00Z", "2032-05-20T14:30:00Z"
+        )
+        earlier = self.new_trip(
+            vehicle_id, "2032-05-20T12:00:00Z", "2032-05-20T12:30:00Z"
+        )
+        middle = self.new_trip(
+            vehicle_id, "2032-05-20T13:00:00Z", "2032-05-20T13:30:00Z"
+        )
+        url = f"{V}/{vehicle_id}/trips"
+
+        history = self.call("GET", url, 200, params={"limit": 10, "offset": 0})
+        self.assertEqual(set(history), {"vehicle_id", "items", "limit", "offset", "count"})
+        self.assertEqual(history["vehicle_id"], vehicle_id)
+        self.assertEqual(history["count"], 3)
+        self.assertEqual(
+            [x["trip_id"] for x in history["items"]],
+            [later["trip_id"], earlier["trip_id"], middle["trip_id"]],
+        )
+        for item in history["items"]:
+            self.assertEqual(set(item), {"trip_id", "start_ts", "end_ts", "distance_km"})
+            self.assertNotIn("vehicle_id", item)
+            self.assertNotIn("start_geom", item)
+            self.assertNotIn("end_geom", item)
+
+        page = self.call("GET", url, 200, params={"limit": 1, "offset": 1})
+        self.assertEqual(page["count"], 3)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(page["items"][0]["trip_id"], earlier["trip_id"])
+
+        filtered = self.call("GET", url, 200, params={
+            "from_ts": "2032-05-20T13:00:00Z",
+            "to_ts": "2032-05-20T14:00:00Z",
+            "limit": 10,
+        })
+        self.assertEqual(
+            {x["trip_id"] for x in filtered["items"]},
+            {later["trip_id"], middle["trip_id"]},
+        )
+        self.assertEqual(filtered["count"], 2)
+
+        self.call(
+            "GET", f"{V}/{MISSING}/trips", 404,
+            detail="vehicle_id does not exist.",
+        )
+        self.call("GET", url, 400, params={"limit": -1})
+
+    def test_43_trip_invalid_query_matrix_and_missing_ids(self):
+        invalid_queries = [
+            {"limit": -1},
+            {"offset": -1},
+            {"limit": "abc"},
+            {"offset": "2.5"},
+            {"limit": "1e2"},
+            {"limit": "-0"},
+            {"vehicle_id": 0},
+            {"vehicle_id": "abc"},
+            {"from_ts": "not-a-date"},
+            {"from_ts": "2032-02-30T10:00:00Z"},
+            {"from_ts": "2032-05-21T13:00:00Z", "to_ts": "2032-05-21T12:00:00Z"},
+        ]
+        for params in invalid_queries:
+            with self.subTest(params=params):
+                self.call(
+                    "GET", T, 400, params=params,
+                    detail="Invalid query parameter values.",
+                )
+
+        self.call(
+            "GET", f"{T}/{MISSING}", 404,
+            detail="trip_id does not exist.",
+        )
+        self.call(
+            "DELETE", f"{T}/{MISSING}", 404,
+            detail="trip_id does not exist.",
+        )
+
+    def test_44_trip_delete_exact_contract_and_foreign_key_protection(self):
+        vehicle = self.new_vehicle()
+        trip = self.new_trip(vehicle_id=vehicle["vehicle_id"])
+        trip_url = f"{T}/{trip['trip_id']}"
+        vehicle_url = f"{V}/{vehicle['vehicle_id']}"
+
+        # A trip's FK must prevent deleting its vehicle.
+        self.call(
+            "DELETE", vehicle_url, 409,
+            detail="Deletion is blocked by business rules/foreign key constraints.",
+        )
+        self.assertEqual(self.call("GET", trip_url, 200), trip)
+
+        deleted = self.call("DELETE", trip_url, 200)
+        self.assertEqual(deleted, {
+            "message": "Trip deleted successfully.",
+            "trip_id": trip["trip_id"],
+        })
+        self.call("GET", trip_url, 404, detail="trip_id does not exist.")
+        self.call("DELETE", trip_url, 404, detail="trip_id does not exist.")
+        self.call("DELETE", vehicle_url, 200)
+
+    def test_45_trip_seed_record_is_unchanged_by_other_operations(self):
+        seed_id = self.seed_trip["trip_id"]
+        seed_url = f"{T}/{seed_id}"
+        original = self.call("GET", seed_url, 200)
+        temporary = self.new_trip()
+        self.call(
+            "PUT", f"{T}/{temporary['trip_id']}", 200,
+            {"distance_km": 123.456},
+        )
+        self.assertEqual(
+            self.call("GET", seed_url, 200), original,
+            "Creating/updating a separate Trip changed a seeded ETL Trip",
+        )
+
+    def test_98_trip_count_preserved_at_end(self):
+        # Clean any remaining temporary resources before comparing with baseline.
+        self.cleanup()
+        current = self.call("GET", T, 200, params={"limit": 0})
+        self.assertEqual(
+            current["count"], self.initial_trip_count,
+            "Trip rows leaked or seeded Trip records were unexpectedly deleted",
+        )
 
     def test_99_parking_count_preserved_at_end(self):
         # All per-test addCleanup handlers should already have run.

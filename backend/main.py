@@ -11,6 +11,7 @@ from backend.handler.health import HealthHandler
 from backend.handler.drivers import DriverHandler
 from backend.handler.vehicles import VehicleHandler
 from backend.handler.vehicle_assignments import VehicleAssignmentHandler
+from backend.handler.trips import TripHandler
 from backend.handler.location_pings import LocationPingHandler
 from backend.handler.parking_areas import ParkingAreaHandler
 from backend.dao.drivers import (
@@ -24,6 +25,10 @@ from backend.dao.vehicles import (
 from backend.dao.vehicle_assignments import (
     AssignmentCreate, AssignmentUpdate, AssignmentResponse,
     AssignmentListResponse, AssignmentDeleteResponse,
+)
+from backend.dao.trips import (
+    TripCreate, TripUpdate, TripResponse, TripListResponse,
+    VehicleTripListResponse, TripDeleteResponse,
 )
 from backend.dao.location_pings import (
     LocationPingCreate, LocationPingUpdate, LocationPingResponse,
@@ -738,6 +743,117 @@ def get_vehicle_pings(
 
 
 # ---------------------------------------------------------
+# Trip REST API (Issue #23)
+# ---------------------------------------------------------
+
+trip_handler = TripHandler()
+
+
+def validate_trip_id(trip_id: int):
+    if trip_id <= 0:
+        raise HTTPException(status_code=400, detail="trip_id must be a positive integer.")
+    return trip_id
+
+
+@app.post(
+    "/api/v1/trips",
+    response_model=TripResponse,
+    status_code=201, response_description="Trip created successfully.",
+    responses={400: {"description": "Malformed geometry or invalid JSON."},
+               404: {"description": "vehicle_id does not exist."}},
+    tags=["Trips"],
+)
+def create_trip(trip: TripCreate):
+    return trip_handler.create_trip(trip.model_dump())
+
+
+@app.get(
+    "/api/v1/trips",
+    response_model=TripListResponse, response_description="Trip collection returned.",
+    responses={400: {"description": "Invalid query parameter values."}},
+    tags=["Trips"],
+)
+def get_trips(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    vehicle_id: str | None = None,
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    return trip_handler.get_trips(limit, offset, vehicle_id, from_ts, to_ts)
+
+
+@app.get(
+    "/api/v1/trips/{trip_id}",
+    response_model=TripResponse, response_description="Trip returned successfully.",
+    responses={404: {"description": "trip_id does not exist."}},
+    tags=["Trips"],
+)
+def get_trip(trip_id: int):
+    validate_trip_id(trip_id)
+    return trip_handler.get_trip_by_id(trip_id)
+
+
+@app.put(
+    "/api/v1/trips/{trip_id}",
+    response_model=TripResponse, response_description="Trip updated successfully.",
+    responses={400: {"description": "Malformed JSON or empty patch payload."},
+               404: {"description": "trip_id or referenced vehicle_id does not exist."},
+               422: {"description": "Validation failed."}},
+    tags=["Trips"],
+)
+def update_trip(trip_id: int, trip: TripUpdate):
+    validate_trip_id(trip_id)
+    return trip_handler.update_trip(trip_id, trip.model_dump(exclude_unset=True))
+
+
+@app.delete(
+    "/api/v1/trips/{trip_id}",
+    response_model=TripDeleteResponse, response_description="Trip deleted.",
+    responses={404: {"description": "trip_id does not exist."}},
+    tags=["Trips"],
+)
+def delete_trip(trip_id: int):
+    validate_trip_id(trip_id)
+    return trip_handler.delete_trip(trip_id)
+
+
+@app.get(
+    "/api/v1/vehicles/{vehicle_id}/trips",
+    response_model=VehicleTripListResponse, response_description="Vehicle trips returned.",
+    responses={400: {"description": "Invalid query parameters."},
+               404: {"description": "vehicle_id does not exist."}},
+    tags=["Trips"],
+)
+
+def get_vehicle_trips(
+    vehicle_id: int,
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    if vehicle_id <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid query parameters.",
+        )
+
+    try:
+        return trip_handler.get_vehicle_trips(
+            vehicle_id, limit, offset, from_ts, to_ts
+        )
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid query parameters.",
+            ) from exc
+        raise
+
+
+
+# ---------------------------------------------------------
 # Validation error handler
 # ---------------------------------------------------------
 
@@ -826,6 +942,41 @@ async def validation_exception_handler(
         else:
             detail = "Malformed geometry or invalid JSON."
         return JSONResponse(status_code=400, content={"detail": detail})
+    # Trip request-validation responses (Issue #23).
+    if path == "/api/v1/trips" or path.startswith("/api/v1/trips/") or (
+        path.startswith("/api/v1/vehicles/") and path.endswith("/trips")
+    ):
+        is_vehicle_trip_history = (
+            path.startswith("/api/v1/vehicles/")
+            and path.endswith("/trips")
+        )
+
+        if any(
+            error.get("loc", [None])[0] == "path"
+            for error in errors
+        ):
+            detail = (
+                "trip_id must be a positive integer."
+                if path.startswith("/api/v1/trips/")
+                else "Invalid query parameters."
+            )
+        elif method == "GET":
+            detail = (
+                "Invalid query parameters."
+                if is_vehicle_trip_history
+                else "Invalid query parameter values."
+            )
+        elif method == "PUT":
+            detail = "Malformed JSON or empty patch payload."
+        else:
+            detail = "Malformed geometry or invalid JSON."
+
+        return JSONResponse(
+            status_code=400,
+            content={"detail": detail},
+        )
+
+
     # Location Ping validation - rubric section 5.4
 
     if (
@@ -1013,6 +1164,14 @@ def custom_openapi():
             for method_details in methods.values():
                 if isinstance(method_details, dict):
                     method_details.get("responses", {}).pop("422", None)
+
+        # Trip rubric: 422 is documented only for updates.
+        if path.startswith("/api/v1/trips") or (
+            path.startswith("/api/v1/vehicles/") and path.endswith("/trips")
+        ):
+            for method, details in methods.items():
+                if isinstance(details, dict) and method.lower() != "put":
+                    details.get("responses", {}).pop("422", None)
 
         # Location ping rubric does not document HTTP 422.
         if path.startswith("/api/v1/location-pings"):
