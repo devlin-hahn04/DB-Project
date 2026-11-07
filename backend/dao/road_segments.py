@@ -103,6 +103,19 @@ class RoadSegmentUpdate(BaseModel):
     def validate_name(cls, value):
         return validate_name_text(value)
 
+class RoadSegmentCreateResponse(BaseModel):
+    road_id: int
+    name: str
+    speed_limit_kph: int | None = None
+    is_oneway: bool | None = None
+    direction: str | None = None
+    geom: dict[str, Any]
+    created_at: datetime | None = None
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime | None) -> str | None:
+        return to_rfc3339(value) if value is not None else None
+
 
 class RoadSegmentListItem(BaseModel):
     road_id: int
@@ -117,8 +130,31 @@ class RoadSegmentListItem(BaseModel):
         return to_rfc3339(value) if value is not None else None
 
 
-class RoadSegmentResponse(RoadSegmentListItem):
+class RoadSegmentResponse(BaseModel):
+    road_id: int
+    name: str
+    speed_limit_kph: int | None = None
+    is_oneway: bool | None = None
+    direction: str | None = None
     geom: dict[str, Any]
+    created_at: datetime | None = None
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime | None) -> str | None:
+        return to_rfc3339(value) if value is not None else None
+
+
+class RoadSegmentGeoJSONProperties(BaseModel):
+    road_id: int
+    name: str
+    speed_limit_kph: int | None = None
+    is_oneway: bool | None = None
+    direction: str | None = None
+    created_at: datetime | None = None
+
+    @field_serializer("created_at")
+    def serialize_created_at(self, value: datetime | None) -> str | None:
+        return to_rfc3339(value) if value is not None else None
 
 
 class RoadSegmentListResponse(BaseModel):
@@ -136,7 +172,7 @@ class RoadSegmentDeleteResponse(BaseModel):
 class RoadSegmentFeature(BaseModel):
     type: Literal["Feature"] = "Feature"
     geometry: dict[str, Any]
-    properties: RoadSegmentListItem
+    properties: RoadSegmentGeoJSONProperties
 
 
 class RoadSegmentFeatureCollection(BaseModel):
@@ -145,6 +181,7 @@ class RoadSegmentFeatureCollection(BaseModel):
     limit: int
     offset: int
     features: list[RoadSegmentFeature]
+
 
 
 # ---------------------------------------------------------

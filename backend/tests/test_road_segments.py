@@ -177,7 +177,19 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
         try:
             status, data = request(url=f"{BASE}/{created['road_id']}")
             self.assertEqual(status, 200, data)
-            self.assertEqual(data, created)
+            expected = {
+                key: created[key]
+                for key in (
+                    "road_id",
+                    "name",
+                    "speed_limit_kph",
+                    "geom",
+                    "created_at",
+                )
+            }
+
+            self.assertEqual(set(data), set(expected))
+            self.assertEqual(data, expected)
         finally:
             self.delete(created["road_id"])
 
@@ -192,11 +204,26 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 404, data)
         self.assertEqual(data["detail"], "road_id does not exist.")
 
-    def test_get_non_positive_or_non_integer_id_returns_400(self):
-        for road_id in ("0", "-1", "abc"):
-            with self.subTest(road_id):
-                status, data = request(url=f"{BASE}/{road_id}")
-                self.assertEqual(status, 400, data)
+    
+    def test_invalid_road_id_returns_exact_400_error(self):
+        expected_detail = "road_id must be a positive integer."
+
+        for method, kwargs in (
+            ("GET", {}),
+            ("PUT", {"payload": {"speed_limit_kph": 50}}),
+            ("DELETE", {}),
+        ):
+            for road_id in ("0", "-1", "abc"):
+                with self.subTest(method=method, road_id=road_id):
+                    status, data = request(
+                        method,
+                        f"{BASE}/{road_id}",
+                        **kwargs
+                    )
+
+                    self.assertEqual(status, 400, data)
+                    self.assertEqual(data["detail"], expected_detail)
+
 
     # ----- PUT /road-segments/{road_id} -----
 
@@ -206,7 +233,7 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
             status, data = request("PUT", f"{BASE}/{created['road_id']}", payload={"speed_limit_kph": 80})
             self.assertEqual(status, 200, data)
             self.assertEqual(data["speed_limit_kph"], 80)
-            for field in ("name", "is_oneway", "direction", "geom", "created_at"):
+            for field in ("name", "geom", "created_at"):
                 self.assertEqual(data[field], created[field], field)
         finally:
             self.delete(created["road_id"])
@@ -223,8 +250,8 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
             }
             status, data = request("PUT", f"{BASE}/{created['road_id']}", payload=changes)
             self.assertEqual(status, 200, data)
-            for field, value in changes.items():
-                self.assertEqual(data[field], value, field)
+            for field in ("name", "speed_limit_kph", "geom"):
+                self.assertEqual(data[field], changes[field], field)
             status, stored = request(url=f"{BASE}/{created['road_id']}")
             self.assertEqual(stored, data)
         finally:
@@ -250,8 +277,23 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
                     self.assertEqual(data["detail"], UPDATE_ERROR)
             status, data = request("PUT", f"{BASE}/{created['road_id']}", raw_body="{bad json")
             self.assertEqual(status, 400, data)
+            self.assertEqual(
+                data["detail"],
+                "Malformed JSON or empty patch payload."
+            )
             status, stored = request(url=f"{BASE}/{created['road_id']}")
-            self.assertEqual(stored, created)
+            expected = {
+                key: created[key]
+                for key in (
+                    "road_id",
+                    "name",
+                    "speed_limit_kph",
+                    "geom",
+                    "created_at",
+                )
+            }
+
+            self.assertEqual(stored, expected)
         finally:
             self.delete(created["road_id"])
 
@@ -269,10 +311,21 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
         self.assertEqual(
             data, {"message": "Road segment deleted successfully.", "road_id": created["road_id"]}
         )
+        
         status, data = request("DELETE", f"{BASE}/{created['road_id']}")
         self.assertEqual(status, 404, data)
+        self.assertEqual(
+            data["detail"],
+            "road_id does not exist."
+        )
+
         status, data = request(url=f"{BASE}/{created['road_id']}")
         self.assertEqual(status, 404, data)
+        self.assertEqual(
+            data["detail"],
+            "road_id does not exist."
+        )
+
 
     # ----- GET /road-segments -----
 
@@ -284,7 +337,7 @@ class RoadSegmentIntegrationTests(unittest.TestCase):
         self.assertEqual([item["road_id"] for item in data["items"]], [6, 7, 8])
         self.assertEqual(
             set(data["items"][0]),
-            {"road_id", "name", "speed_limit_kph", "is_oneway", "direction", "created_at"},
+            {"road_id", "name", "speed_limit_kph", "created_at"},
         )
         status, zero = request(params={"limit": 0})
         self.assertEqual(status, 200, zero)

@@ -40,8 +40,13 @@ from backend.dao.parking_areas import (
     ParkingAreaListResponse, ParkingAreaDeleteResponse,
 )
 from backend.dao.road_segments import (
-    RoadSegmentCreate, RoadSegmentUpdate, RoadSegmentResponse,
-    RoadSegmentListResponse, RoadSegmentDeleteResponse, RoadSegmentFeatureCollection,
+    RoadSegmentCreate,
+    RoadSegmentUpdate,
+    RoadSegmentCreateResponse,
+    RoadSegmentResponse,
+    RoadSegmentListResponse,
+    RoadSegmentDeleteResponse,
+    RoadSegmentFeatureCollection,
 )
 
 
@@ -660,7 +665,7 @@ def validate_road_id(road_id: int):
 
 @app.post(
     "/api/v1/road-segments",
-    response_model=RoadSegmentResponse,
+    response_model=RoadSegmentCreateResponse,
     status_code=201,
     response_description="Road segment created successfully.",
     responses={400: {"description": "Malformed geometry or invalid JSON."}},
