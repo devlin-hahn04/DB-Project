@@ -27,6 +27,7 @@ A = API + "/vehicle-assignments"
 P = API + "/location-pings"
 PA = API + "/parking-areas"
 T = API + "/trips"
+RS = API + "/road-segments"
 MISSING = 999999999
 START = "2032-05-20T12:00:00Z"
 END = "2032-05-20T13:00:00Z"
@@ -203,6 +204,38 @@ EXPECTED.update({
 })
 
 
+# Road Segment rubric (Section 5.2): 15 additional response codes.
+EXPECTED.update({
+    ("/api/v1/road-segments", "post"): {
+        "201": "Road segment created successfully.",
+        "400": "Malformed geometry or invalid JSON.",
+    },
+    ("/api/v1/road-segments", "get"): {
+        "200": "Road segment collection returned.",
+        "400": "Invalid query parameter values.",
+    },
+    ("/api/v1/road-segments/{road_id}", "get"): {
+        "200": "Road segment returned.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/{road_id}", "put"): {
+        "200": "Road segment updated successfully.",
+        "400": "Malformed JSON or empty patch payload.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/{road_id}", "delete"): {
+        "200": "Road segment deleted.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/geojson", "get"): {
+        "200": "GeoJSON FeatureCollection returned successfully.",
+        "400": "Invalid or inconsistent filter values.",
+        "422": "A query parameter fails type or range validation.",
+        "500": "The service could not complete the request.",
+    },
+})
+
+
 def http(method, url, body=None, params=None, raw=None):
     """Send an HTTP request and return status plus decoded JSON."""
     if params is not None:
@@ -305,7 +338,7 @@ class ProfessorGrader(unittest.TestCase):
                 "is not cartracking_test."
             )
 
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             status, response = http("GET", url, params={"limit": 1})
             if status != 200 or not response.get("items"):
                 raise RuntimeError("Populated test database required: " + url)
@@ -323,8 +356,18 @@ class ProfessorGrader(unittest.TestCase):
         )[1]["items"][0]
 
         cls.resources = []
-        cls.initial_parking_count = http("GET", PA, params={"limit": 0})[1]["count"]
-        cls.initial_trip_count = http("GET", T, params={"limit": 0})[1]["count"]
+
+        cls.initial_parking_count = http(
+            "GET", PA, params={"limit": 0}
+        )[1]["count"]
+
+        cls.initial_trip_count = http(
+            "GET", T, params={"limit": 0}
+        )[1]["count"]
+
+        cls.initial_road_count = http(
+            "GET", RS, params={"limit": 0}
+        )[1]["count"]
 
     @classmethod
     def tearDownClass(cls):
@@ -501,7 +544,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 91)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 106)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -514,7 +557,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_02_all_list_shapes_and_zero_limit(self):
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             with self.subTest(url=url):
                 response = self.call(
                     "GET", url, 200,
@@ -1110,7 +1153,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(status, 404)
 
     def test_19_invalid_query_and_path_boundaries(self):
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             with self.subTest(url=url):
                 self.call(
                     "GET", url, 400,
@@ -1121,6 +1164,7 @@ class ProfessorGrader(unittest.TestCase):
         for url, message in [
             (P, "ping_id must be a positive integer."),
             (A, "assignment_id must be a positive integer."),
+            (RS, "road_id must be a positive integer."),
         ]:
             with self.subTest(url=url):
                 self.call(
@@ -1136,7 +1180,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_20_cleanup_and_preservation(self):
         self.cleanup()
 
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             response = self.call(
                 "GET", url, 200,
                 params={"limit": 0}
@@ -1437,6 +1481,7 @@ class ProfessorGrader(unittest.TestCase):
             "end_ts": "2032-05-20T08:45:00-04:00",
             "start_geom": start,
             "end_geom": end,
+
             "distance_km": 6.7,
         }
 
@@ -1847,6 +1892,1272 @@ class ProfessorGrader(unittest.TestCase):
         current = self.call("GET", PA, 200, params={"limit": 0})
         self.assertEqual(current["count"], self.initial_parking_count,
                          "Parking Area records leaked or were unexpectedly deleted")
+
+
+
+    # -------------------------------------------------------
+    # Road Segments: professor-style, adversarial E2E tests
+    # -------------------------------------------------------
+
+    @staticmethod
+    def road_line(*coordinates):
+        """Build a GeoJSON LineString using longitude/latitude pairs."""
+        return {
+            "type": "LineString",
+            "coordinates": [list(point) for point in coordinates],
+        }
+
+    def new_road_segment(self, **overrides):
+        """Create a temporary Road Segment and register it for cleanup."""
+        payload = {
+            "name": "Professor Road " + uuid.uuid4().hex,
+            "speed_limit_kph": 60,
+            "is_oneway": True,
+            "direction": "forward",
+            "geom": self.road_line(
+                (-65.55, 18.38),
+                (-65.50, 18.40),
+                (-65.45, 18.42),
+            ),
+        }
+
+        payload.update(overrides)
+
+        created = self.call("POST", RS, 201, payload)
+
+        self.resources.append(
+            f"{RS}/{created['road_id']}"
+        )
+
+        return created
+
+    # -------------------------------------------------------
+    # 46. POST: Exact creation contract
+    # -------------------------------------------------------
+
+    def test_46_road_create_exact_contract_and_unique_ids(self):
+        first = self.new_road_segment()
+
+        second = self.new_road_segment()
+
+        self.assertEqual(
+            set(first),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "is_oneway",
+                "direction",
+                "geom",
+                "created_at",
+            },
+        )
+
+        self.assertIsInstance(first["road_id"], int)
+        self.assertGreater(first["road_id"], 0)
+
+        self.assertNotEqual(
+            first["road_id"],
+            second["road_id"],
+        )
+
+        self.assertEqual(first["speed_limit_kph"], 60)
+        self.assertIs(first["is_oneway"], True)
+        self.assertEqual(first["direction"], "forward")
+
+        self.assertEqual(
+            first["geom"],
+            self.road_line(
+                (-65.55, 18.38),
+                (-65.50, 18.40),
+                (-65.45, 18.42),
+            ),
+        )
+
+        self.assertTrue(first["created_at"].endswith("Z"))
+
+        fetched = self.call(
+            "GET",
+            f"{RS}/{first['road_id']}",
+            200,
+        )
+
+        self.assertEqual(fetched, first)
+
+    # -------------------------------------------------------
+    # 47. POST: Optional fields and name normalization
+    # -------------------------------------------------------
+
+    def test_47_road_create_optional_fields_and_name_trimming(self):
+        token = "OptionalRoad" + uuid.uuid4().hex[:10]
+
+        created = self.call(
+            "POST",
+            RS,
+            201,
+            {
+                "name": f"  {token}  ",
+                "geom": self.road_line(
+                    (-65.55, 18.38),
+                    (-65.50, 18.40),
+                ),
+            },
+        )
+
+        self.resources.append(
+            f"{RS}/{created['road_id']}"
+        )
+
+        self.assertEqual(created["name"], token)
+
+        self.assertIsNone(created["speed_limit_kph"])
+        self.assertIsNone(created["is_oneway"])
+        self.assertIsNone(created["direction"])
+
+        fetched = self.call(
+            "GET",
+            f"{RS}/{created['road_id']}",
+            200,
+        )
+
+        self.assertEqual(fetched, created)
+
+    # -------------------------------------------------------
+    # 48. POST: Adversarial invalid payload matrix
+    # -------------------------------------------------------
+
+    def test_48_road_create_invalid_payload_matrix_is_atomic(self):
+        valid = {
+            "name": "Rejected Road " + uuid.uuid4().hex,
+            "speed_limit_kph": 60,
+            "is_oneway": True,
+            "direction": "forward",
+            "geom": self.road_line(
+                (-65.55, 18.38),
+                (-65.50, 18.40),
+            ),
+        }
+
+        missing_name = valid.copy()
+        del missing_name["name"]
+
+        missing_geom = valid.copy()
+        del missing_geom["geom"]
+
+        invalid = {
+            "missing name": missing_name,
+
+            "null name": {
+                **valid,
+                "name": None,
+            },
+
+            "empty name": {
+                **valid,
+                "name": "",
+            },
+
+            "whitespace name": {
+                **valid,
+                "name": "   ",
+            },
+
+            "numeric name": {
+                **valid,
+                "name": 123,
+            },
+
+            "missing geometry": missing_geom,
+
+            "null geometry": {
+                **valid,
+                "geom": None,
+            },
+
+            "Point instead of LineString": {
+                **valid,
+                "geom": point(),
+            },
+
+            "one coordinate": {
+                **valid,
+                "geom": self.road_line(
+                    (-65.5, 18.4),
+                ),
+            },
+
+            "duplicate coordinates": {
+                **valid,
+                "geom": self.road_line(
+                    (-65.5, 18.4),
+                    (-65.5, 18.4),
+                ),
+            },
+
+            "three-dimensional coordinates": {
+                **valid,
+                "geom": {
+                    "type": "LineString",
+                    "coordinates": [
+                        [-65.5, 18.4, 10],
+                        [-65.4, 18.5, 10],
+                    ],
+                },
+            },
+
+            "string coordinate": {
+                **valid,
+                "geom": {
+                    "type": "LineString",
+                    "coordinates": [
+                        ["invalid", 18.4],
+                        [-65.4, 18.5],
+                    ],
+                },
+            },
+
+            "longitude above range": {
+                **valid,
+                "geom": self.road_line(
+                    (181, 18.4),
+                    (-65.4, 18.5),
+                ),
+            },
+
+            "longitude below range": {
+                **valid,
+                "geom": self.road_line(
+                    (-181, 18.4),
+                    (-65.4, 18.5),
+                ),
+            },
+
+            "latitude above range": {
+                **valid,
+                "geom": self.road_line(
+                    (-65.5, 91),
+                    (-65.4, 18.5),
+                ),
+            },
+
+            "latitude below range": {
+                **valid,
+                "geom": self.road_line(
+                    (-65.5, -91),
+                    (-65.4, 18.5),
+                ),
+            },
+
+            "negative speed": {
+                **valid,
+                "speed_limit_kph": -1,
+            },
+
+            "fractional speed": {
+                **valid,
+                "speed_limit_kph": 60.5,
+            },
+
+            "invalid direction": {
+                **valid,
+                "direction": "backward",
+            },
+
+            "unknown direction": {
+                **valid,
+                "direction": "north",
+            },
+
+            "unexpected field": {
+                **valid,
+                "lanes": 3,
+            },
+
+            "unexpected geometry field": {
+                **valid,
+                "geom": {
+                    **valid["geom"],
+                    "crs": "EPSG:4326",
+                },
+            },
+
+            "array instead of object": [
+                valid,
+            ],
+        }
+
+        before = self.call(
+            "GET",
+            RS,
+            200,
+            params={"limit": 0},
+        )["count"]
+
+        for label, payload in invalid.items():
+            with self.subTest(case=label):
+                self.call(
+                    "POST",
+                    RS,
+                    400,
+                    payload,
+                    detail="Malformed geometry or invalid JSON.",
+                )
+
+        self.call(
+            "POST",
+            RS,
+            400,
+            raw="{broken JSON",
+            detail="Malformed geometry or invalid JSON.",
+        )
+
+        after = self.call(
+            "GET",
+            RS,
+            200,
+            params={"limit": 0},
+        )["count"]
+
+        self.assertEqual(
+            after,
+            before,
+            "Rejected Road Segment POST changed the database.",
+        )
+
+    # -------------------------------------------------------
+    # 49. GET: Collection structure and pagination
+    # -------------------------------------------------------
+
+    def test_49_road_collection_pagination_and_zero_limit(self):
+        token = "PaginationRoad" + uuid.uuid4().hex[:10]
+
+        roads = [
+            self.new_road_segment(name=f"{token} {i}")
+            for i in range(3)
+        ]
+
+        expected_ids = sorted(
+            road["road_id"] for road in roads
+        )
+
+        pages = []
+
+        for offset in range(4):
+            page = self.call(
+                "GET",
+                RS,
+                200,
+                params={
+                    "name": token,
+                    "limit": 1,
+                    "offset": offset,
+                },
+            )
+
+            pages.append(page)
+
+            self.assertEqual(page["count"], 3)
+            self.assertEqual(page["limit"], 1)
+            self.assertEqual(page["offset"], offset)
+
+        self.assertEqual(
+            [
+                page["items"][0]["road_id"]
+                for page in pages[:3]
+            ],
+            expected_ids,
+        )
+
+        self.assertEqual(pages[3]["items"], [])
+
+        self.assertEqual(
+            set(pages[0]["items"][0]),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "is_oneway",
+                "direction",
+                "created_at",
+            },
+        )
+
+        self.assertNotIn(
+            "geom",
+            pages[0]["items"][0],
+        )
+
+        zero = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token,
+                "limit": 0,
+                "offset": 0,
+            },
+        )
+
+        self.assertEqual(zero["items"], [])
+        self.assertEqual(zero["count"], 3)
+        self.assertEqual(zero["limit"], 0)
+
+    # -------------------------------------------------------
+    # 50. GET: Combined filters and AND semantics
+    # -------------------------------------------------------
+
+    def test_50_road_combined_filters_are_intersection(self):
+        token = "FilterRoad" + uuid.uuid4().hex[:10]
+
+        inside = self.new_road_segment(
+            name=f"{token} Inside",
+            speed_limit_kph=40,
+            geom=self.road_line(
+                (-65.55, 18.38),
+                (-65.50, 18.40),
+            ),
+        )
+
+        crossing = self.new_road_segment(
+            name=f"{token} Crossing",
+            speed_limit_kph=60,
+            geom=self.road_line(
+                (-65.70, 18.40),
+                (-65.50, 18.40),
+            ),
+        )
+
+        outside = self.new_road_segment(
+            name=f"{token} Outside",
+            speed_limit_kph=80,
+            geom=self.road_line(
+                (-65.10, 18.40),
+                (-65.00, 18.45),
+            ),
+        )
+
+        ids = lambda response: [
+            item["road_id"]
+            for item in response["items"]
+        ]
+
+        result = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token.lower(),
+                "limit": 20,
+            },
+        )
+
+        self.assertEqual(
+            ids(result),
+            [
+                inside["road_id"],
+                crossing["road_id"],
+                outside["road_id"],
+            ],
+        )
+
+        speed_filtered = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token,
+                "min_speed_kph": 50,
+                "max_speed_kph": 80,
+            },
+        )
+
+        self.assertEqual(
+            ids(speed_filtered),
+            [
+                crossing["road_id"],
+                outside["road_id"],
+            ],
+        )
+
+        bbox = "-65.6,18.3,-65.4,18.5"
+
+        spatial = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "bbox": bbox,
+                "name": token,
+            },
+        )
+
+        self.assertEqual(
+            ids(spatial),
+            [
+                inside["road_id"],
+                crossing["road_id"],
+            ],
+        )
+
+        combined = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "bbox": bbox,
+                "name": token,
+                "min_speed_kph": 50,
+                "max_speed_kph": 70,
+            },
+        )
+
+        self.assertEqual(combined["count"], 1)
+
+        self.assertEqual(
+            ids(combined),
+            [crossing["road_id"]],
+        )
+
+        excluded = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token,
+                "bbox": "-100,1,-99,2",
+            },
+        )
+
+        self.assertEqual(excluded["items"], [])
+        self.assertEqual(excluded["count"], 0)
+
+    # -------------------------------------------------------
+    # 51. GET: Bounding box boundary intersection
+    # -------------------------------------------------------
+
+    def test_51_road_bbox_includes_boundary_intersections(self):
+        token = "BoundaryRoad" + uuid.uuid4().hex[:10]
+
+        road = self.new_road_segment(
+            name=token,
+            geom=self.road_line(
+                (-65.70, 18.40),
+                (-65.60, 18.40),
+            ),
+        )
+
+        # The endpoint touches the minimum longitude boundary.
+        touching = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token,
+                "bbox": "-65.6,18.3,-65.4,18.5",
+            },
+        )
+
+        self.assertEqual(touching["count"], 1)
+
+        self.assertEqual(
+            touching["items"][0]["road_id"],
+            road["road_id"],
+        )
+
+        # Moving the box slightly away must exclude the road.
+        separated = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": token,
+                "bbox": "-65.59,18.3,-65.4,18.5",
+            },
+        )
+
+        self.assertEqual(separated["count"], 0)
+        self.assertEqual(separated["items"], [])
+
+    # -------------------------------------------------------
+    # 52. GET: Invalid collection query parameters
+    # -------------------------------------------------------
+
+    def test_52_road_invalid_query_parameter_matrix(self):
+        invalid_queries = [
+            {"limit": -1},
+            {"offset": -1},
+            {"limit": "abc"},
+            {"offset": "2.5"},
+            {"limit": "1e2"},
+            {"limit": "-0"},
+            {"min_speed_kph": -1},
+            {"max_speed_kph": -1},
+            {"min_speed_kph": "fast"},
+            {"max_speed_kph": "slow"},
+            {"min_speed_kph": 100, "max_speed_kph": 50},
+            {"bbox": ""},
+            {"bbox": "invalid"},
+            {"bbox": "-67,18,-65"},
+            {"bbox": "x,18,-65,19"},
+            {"bbox": "nan,18,-65,19"},
+            {"bbox": "-67,18,inf,19"},
+            {"bbox": "-65,18,-67,19"},
+            {"bbox": "-65,20,-64,19"},
+            {"bbox": "-200,18,-65,19"},
+            {"bbox": "-67,18,-65,91"},
+        ]
+
+        for params in invalid_queries:
+            with self.subTest(params=params):
+                self.call(
+                    "GET",
+                    RS,
+                    400,
+                    params=params,
+                    detail="Invalid query parameter values.",
+                )
+
+    # -------------------------------------------------------
+    # 53. GET / PUT / DELETE: Invalid and missing road IDs
+    # -------------------------------------------------------
+
+    def test_53_road_invalid_ids_exact_error_across_methods(self):
+        expected_detail = (
+            "road_id must be a positive integer."
+        )
+
+        methods = [
+            ("GET", None),
+            ("PUT", {"speed_limit_kph": 50}),
+            ("DELETE", None),
+        ]
+
+        for method, body in methods:
+            for road_id in ("0", "-1", "abc"):
+                with self.subTest(
+                    method=method,
+                    road_id=road_id,
+                ):
+                    self.call(
+                        method,
+                        f"{RS}/{road_id}",
+                        400,
+                        body,
+                        detail=expected_detail,
+                    )
+
+        missing_detail = "road_id does not exist."
+
+        for method, body in methods:
+            with self.subTest(
+                method=method,
+                road_id=MISSING,
+            ):
+                self.call(
+                    method,
+                    f"{RS}/{MISSING}",
+                    404,
+                    body,
+                    detail=missing_detail,
+                )
+
+    # -------------------------------------------------------
+    # 54. PUT: Partial, full and nullable updates
+    # -------------------------------------------------------
+
+    def test_54_road_partial_full_updates_and_persistence(self):
+        road = self.new_road_segment()
+
+        url = f"{RS}/{road['road_id']}"
+
+        # Partial update: only speed should change.
+        partial = self.call(
+            "PUT",
+            url,
+            200,
+            {
+                "speed_limit_kph": 80,
+            },
+        )
+
+        self.assertEqual(
+            partial["speed_limit_kph"],
+            80,
+        )
+
+        for field in (
+            "road_id",
+            "name",
+            "is_oneway",
+            "direction",
+            "geom",
+            "created_at",
+        ):
+            self.assertEqual(
+                partial[field],
+                road[field],
+                field,
+            )
+
+        # Full update.
+        new_geom = self.road_line(
+            (-65.58, 18.35),
+            (-65.52, 18.40),
+            (-65.42, 18.45),
+        )
+
+        changes = {
+            "name": "Updated Road " + uuid.uuid4().hex,
+            "speed_limit_kph": 0,
+            "is_oneway": False,
+            "direction": "both",
+            "geom": new_geom,
+        }
+
+        updated = self.call(
+            "PUT",
+            url,
+            200,
+            changes,
+        )
+
+        for field, value in changes.items():
+            self.assertEqual(
+                updated[field],
+                value,
+                field,
+            )
+
+        self.assertEqual(
+            updated["created_at"],
+            road["created_at"],
+        )
+
+        self.assertEqual(
+            self.call("GET", url, 200),
+            updated,
+        )
+
+        # Optional database fields can be explicitly cleared.
+        cleared = self.call(
+            "PUT",
+            url,
+            200,
+            {
+                "speed_limit_kph": None,
+                "is_oneway": None,
+                "direction": None,
+            },
+        )
+
+        self.assertIsNone(cleared["speed_limit_kph"])
+        self.assertIsNone(cleared["is_oneway"])
+        self.assertIsNone(cleared["direction"])
+
+        self.assertEqual(
+            cleared["geom"],
+            new_geom,
+        )
+
+        self.assertEqual(
+            self.call("GET", url, 200),
+            cleared,
+        )
+
+    # -------------------------------------------------------
+    # 55. PUT: Invalid updates and atomicity
+    # -------------------------------------------------------
+
+    def test_55_road_invalid_updates_are_atomic(self):
+        road = self.new_road_segment()
+
+        url = f"{RS}/{road['road_id']}"
+
+        before = self.call(
+            "GET",
+            url,
+            200,
+        )
+
+        invalid_updates = {
+            "empty patch": {},
+
+            "null name": {
+                "name": None,
+            },
+
+            "empty name": {
+                "name": "",
+            },
+
+            "whitespace name": {
+                "name": "  ",
+            },
+
+            "null geometry": {
+                "geom": None,
+            },
+
+            "negative speed": {
+                "speed_limit_kph": -1,
+            },
+
+            "fractional speed": {
+                "speed_limit_kph": 60.5,
+            },
+
+            "invalid direction": {
+                "direction": "backward",
+            },
+
+            "invalid direction value": {
+                "direction": "north",
+            },
+
+            "wrong geometry type": {
+                "geom": point(),
+            },
+
+            "one coordinate": {
+                "geom": self.road_line(
+                    (-65.5, 18.4),
+                ),
+            },
+
+            "unknown field": {
+                "lanes": 3,
+            },
+
+            "valid fields mixed with invalid geometry": {
+                "name": "MUST NOT BE SAVED",
+                "speed_limit_kph": 0,
+                "geom": {
+                    "type": "LineString",
+                    "coordinates": [],
+                },
+            },
+        }
+
+        for label, changes in invalid_updates.items():
+            with self.subTest(case=label):
+                self.call(
+                    "PUT",
+                    url,
+                    400,
+                    changes,
+                    detail="Malformed JSON or empty patch payload.",
+                )
+
+                self.assertEqual(
+                    self.call("GET", url, 200),
+                    before,
+                    f"Invalid update mutated Road Segment: {label}",
+                )
+
+        self.call(
+            "PUT",
+            url,
+            400,
+            raw="{bad JSON",
+            detail="Malformed JSON or empty patch payload.",
+        )
+
+        self.assertEqual(
+            self.call("GET", url, 200),
+            before,
+            "Malformed JSON modified the original record.",
+        )
+
+        # A nonexistent road must not be created by an update.
+        self.call(
+            "PUT",
+            f"{RS}/{MISSING}",
+            404,
+            {
+                "speed_limit_kph": 50,
+            },
+            detail="road_id does not exist.",
+        )
+
+    # -------------------------------------------------------
+    # 56. GeoJSON: Exact FeatureCollection contract
+    # -------------------------------------------------------
+
+    def test_56_road_geojson_exact_feature_collection_contract(self):
+        token = "GeoJSONRoad" + uuid.uuid4().hex[:10]
+
+        road = self.new_road_segment(
+            name=token,
+        )
+
+        url = (
+            f"{RS}/geojson?"
+            + urlencode({"name": token})
+        )
+
+        request = Request(url, method="GET")
+
+        with urlopen(request, timeout=15) as response:
+            self.assertEqual(response.status, 200)
+
+            self.assertTrue(
+                response.headers.get("Content-Type", "").startswith(
+                    "application/geo+json"
+                )
+            )
+
+            data = json.loads(
+                response.read()
+            )
+
+        self.assertEqual(
+            set(data),
+            {
+                "type",
+                "count",
+                "limit",
+                "offset",
+                "features",
+            },
+        )
+
+        self.assertEqual(
+            data["type"],
+            "FeatureCollection",
+        )
+
+        self.assertEqual(data["count"], 1)
+        self.assertEqual(data["limit"], 15000)
+        self.assertEqual(data["offset"], 0)
+
+        self.assertEqual(len(data["features"]), 1)
+
+        feature = data["features"][0]
+
+        self.assertEqual(
+            set(feature),
+            {
+                "type",
+                "geometry",
+                "properties",
+            },
+        )
+
+        self.assertEqual(
+            feature["type"],
+            "Feature",
+        )
+
+        self.assertEqual(
+            feature["geometry"],
+            road["geom"],
+        )
+
+        expected_properties = {
+            key: road[key]
+            for key in (
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "is_oneway",
+                "direction",
+                "created_at",
+            )
+        }
+
+        self.assertEqual(
+            feature["properties"],
+            expected_properties,
+        )
+
+    # -------------------------------------------------------
+    # 57. GeoJSON: Filters and pagination
+    # -------------------------------------------------------
+
+    def test_57_road_geojson_filters_and_count_before_pagination(self):
+        token = "GeoFilter" + uuid.uuid4().hex[:10]
+
+        slow = self.new_road_segment(
+            name=f"{token} Slow",
+            speed_limit_kph=30,
+        )
+
+        fast = self.new_road_segment(
+            name=f"{token} Fast",
+            speed_limit_kph=70,
+        )
+
+        filtered = self.call(
+            "GET",
+            f"{RS}/geojson",
+            200,
+            params={
+                "name": token.lower(),
+                "min_speed_kph": 40,
+                "max_speed_kph": 80,
+            },
+        )
+
+        self.assertEqual(filtered["count"], 1)
+
+        self.assertEqual(
+            [
+                feature["properties"]["road_id"]
+                for feature in filtered["features"]
+            ],
+            [fast["road_id"]],
+        )
+
+        paginated = self.call(
+            "GET",
+            f"{RS}/geojson",
+            200,
+            params={
+                "name": token,
+                "limit": 1,
+                "offset": 1,
+            },
+        )
+
+        self.assertEqual(paginated["count"], 2)
+        self.assertEqual(paginated["limit"], 1)
+        self.assertEqual(paginated["offset"], 1)
+
+        self.assertEqual(
+            len(paginated["features"]),
+            1,
+        )
+
+        self.assertEqual(
+            paginated["features"][0]["properties"]["road_id"],
+            fast["road_id"],
+        )
+
+        zero = self.call(
+            "GET",
+            f"{RS}/geojson",
+            200,
+            params={
+                "name": token,
+                "limit": 0,
+            },
+        )
+
+        self.assertEqual(zero["features"], [])
+        self.assertEqual(zero["count"], 2)
+
+    # -------------------------------------------------------
+    # 58. GeoJSON: Exact filter and validation errors
+    # -------------------------------------------------------
+
+    def test_58_road_geojson_invalid_filter_matrix(self):
+        invalid_filters = [
+            {
+                "params": {
+                    "bbox": "-65.6,18.3,-65.4,18.5",
+                },
+                "status": 400,
+                "detail": "Invalid or inconsistent filter values.",
+            },
+            {
+                "params": {
+                    "min_speed_kph": 80,
+                    "max_speed_kph": 40,
+                },
+                "status": 400,
+                "detail": "Invalid or inconsistent filter values.",
+            },
+            {
+                "params": {
+                    "limit": -1,
+                },
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+            {
+                "params": {
+                    "limit": "many",
+                },
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+            {
+                "params": {
+                    "offset": "x",
+                },
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+            {
+                "params": {
+                    "min_speed_kph": "slow",
+                },
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+            {
+                "params": {
+                    "max_speed_kph": -10,
+                },
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+        ]
+
+        for case in invalid_filters:
+            with self.subTest(params=case["params"]):
+                self.call(
+                    "GET",
+                    f"{RS}/geojson",
+                    case["status"],
+                    params=case["params"],
+                    detail=case["detail"],
+                )
+
+    # -------------------------------------------------------
+    # 59. DELETE: Exact response and repeated deletion
+    # -------------------------------------------------------
+
+    def test_59_road_delete_exact_contract_and_repeated_delete(self):
+        road = self.new_road_segment()
+
+        url = f"{RS}/{road['road_id']}"
+
+        deleted = self.call(
+            "DELETE",
+            url,
+            200,
+        )
+
+        self.assertEqual(
+            deleted,
+            {
+                "message": "Road segment deleted successfully.",
+                "road_id": road["road_id"],
+            },
+        )
+
+        self.call(
+            "GET",
+            url,
+            404,
+            detail="road_id does not exist.",
+        )
+
+        self.call(
+            "DELETE",
+            url,
+            404,
+            detail="road_id does not exist.",
+        )
+
+    # -------------------------------------------------------
+    # 60. Database integrity: Seed record preservation
+    # -------------------------------------------------------
+
+    def test_60_road_seed_record_unchanged_by_other_operations(self):
+        baseline_list = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "limit": 1,
+                "offset": 0,
+            },
+        )
+
+        self.assertTrue(baseline_list["items"])
+
+        seed_id = baseline_list["items"][0]["road_id"]
+
+        seed_url = f"{RS}/{seed_id}"
+
+        original = self.call(
+            "GET",
+            seed_url,
+            200,
+        )
+
+        temporary = self.new_road_segment()
+
+        self.call(
+            "PUT",
+            f"{RS}/{temporary['road_id']}",
+            200,
+            {
+                "name": "Temporary Updated Road",
+                "speed_limit_kph": 100,
+                "direction": "both",
+                "is_oneway": False,
+            },
+        )
+
+        self.assertEqual(
+            self.call("GET", seed_url, 200),
+            original,
+            "Creating/updating a different road modified a seeded Road Segment.",
+        )
+
+    # -------------------------------------------------------
+    # 61. Security: SQL injection-like filter values
+    # -------------------------------------------------------
+
+    def test_61_road_sql_injection_like_name_is_treated_as_data(self):
+        suspicious = (
+            "' OR 1=1 -- "
+            + uuid.uuid4().hex
+        )
+
+        result = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "name": suspicious,
+                "limit": 20,
+            },
+        )
+
+        self.assertEqual(result["count"], 0)
+        self.assertEqual(result["items"], [])
+
+        # The collection must still contain its original records.
+        total = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "limit": 0,
+            },
+        )
+
+        self.assertGreater(total["count"], 0)
+
+    # -------------------------------------------------------
+    # Final Road Segment database preservation
+    # -------------------------------------------------------
+
+    def test_zz_road_count_preserved_at_end(self):
+        # Remove any remaining temporary resources before comparing.
+        self.cleanup()
+
+        current = self.call(
+            "GET",
+            RS,
+            200,
+            params={
+                "limit": 0,
+            },
+        )
+
+        self.assertEqual(
+            current["count"],
+            self.initial_road_count,
+            (
+                "Road Segment records leaked, seeded records were deleted, "
+                "or the original database count changed."
+            ),
+        )
 
 
 if __name__ == "__main__":

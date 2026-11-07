@@ -14,6 +14,7 @@ from backend.handler.vehicle_assignments import VehicleAssignmentHandler
 from backend.handler.trips import TripHandler
 from backend.handler.location_pings import LocationPingHandler
 from backend.handler.parking_areas import ParkingAreaHandler
+from backend.handler.road_segments import RoadSegmentHandler
 from backend.dao.drivers import (
     DriverCreate, DriverUpdate, DriverResponse, DriverListResponse,
     DriverDeleteResponse,
@@ -37,6 +38,15 @@ from backend.dao.location_pings import (
 from backend.dao.parking_areas import (
     ParkingAreaCreate, ParkingAreaUpdate, ParkingAreaResponse,
     ParkingAreaListResponse, ParkingAreaDeleteResponse,
+)
+from backend.dao.road_segments import (
+    RoadSegmentCreate,
+    RoadSegmentUpdate,
+    RoadSegmentCreateResponse,
+    RoadSegmentResponse,
+    RoadSegmentListResponse,
+    RoadSegmentDeleteResponse,
+    RoadSegmentFeatureCollection,
 )
 
 
@@ -637,6 +647,122 @@ def delete_parking_area(parking_area_id: int):
 
 
 # ---------------------------------------------------------
+# Road Segment REST API (Issue #30)
+# ---------------------------------------------------------
+
+road_segment_handler = RoadSegmentHandler()
+
+
+class GeoJSONResponse(JSONResponse):
+    media_type = "application/geo+json"
+
+
+def validate_road_id(road_id: int):
+    if road_id <= 0:
+        raise HTTPException(status_code=400, detail="road_id must be a positive integer.")
+    return road_id
+
+
+@app.post(
+    "/api/v1/road-segments",
+    response_model=RoadSegmentCreateResponse,
+    status_code=201,
+    response_description="Road segment created successfully.",
+    responses={400: {"description": "Malformed geometry or invalid JSON."}},
+    tags=["Road Segments"],
+)
+def create_road_segment(road_segment: RoadSegmentCreate):
+    return road_segment_handler.create_road_segment(road_segment.model_dump())
+
+
+@app.get(
+    "/api/v1/road-segments",
+    response_model=RoadSegmentListResponse,
+    response_description="Road segment collection returned.",
+    responses={400: {"description": "Invalid query parameter values."}},
+    tags=["Road Segments"],
+)
+def get_road_segments(
+    limit: str = Query(default="20"),
+    offset: str = Query(default="0"),
+    name: str | None = None,
+    min_speed_kph: str | None = None,
+    max_speed_kph: str | None = None,
+    bbox: str | None = Query(default=None, description="minLon,minLat,maxLon,maxLat"),
+):
+    return road_segment_handler.get_all_road_segments(
+        limit, offset, name, min_speed_kph, max_speed_kph, bbox,
+    )
+
+
+# Registered before /{road_id} so "geojson" is not read as a road_id.
+@app.get(
+    "/api/v1/road-segments/geojson",
+    response_model=RoadSegmentFeatureCollection,
+    response_class=GeoJSONResponse,
+    response_description="GeoJSON FeatureCollection returned successfully.",
+    responses={
+        400: {"description": "Invalid or inconsistent filter values."},
+        422: {"description": "A query parameter fails type or range validation."},
+        500: {"description": "The service could not complete the request."},
+    },
+    tags=["Road Segments"],
+)
+def get_road_segments_geojson(
+    limit: str = Query(default="15000"),
+    offset: str = Query(default="0"),
+    name: str | None = None,
+    min_speed_kph: str | None = None,
+    max_speed_kph: str | None = None,
+    bbox: str | None = Query(default=None, include_in_schema=False),
+):
+    return road_segment_handler.get_road_segments_geojson(
+        limit, offset, name, min_speed_kph, max_speed_kph, bbox,
+    )
+
+
+@app.get(
+    "/api/v1/road-segments/{road_id}",
+    response_model=RoadSegmentResponse,
+    response_description="Road segment returned.",
+    responses={404: {"description": "road_id does not exist."}},
+    tags=["Road Segments"],
+)
+def get_road_segment(road_id: int):
+    validate_road_id(road_id)
+    return road_segment_handler.get_road_segment_by_id(road_id)
+
+
+@app.put(
+    "/api/v1/road-segments/{road_id}",
+    response_model=RoadSegmentResponse,
+    response_description="Road segment updated successfully.",
+    responses={
+        400: {"description": "Malformed JSON or empty patch payload."},
+        404: {"description": "road_id does not exist."},
+    },
+    tags=["Road Segments"],
+)
+def update_road_segment(road_id: int, road_segment: RoadSegmentUpdate):
+    validate_road_id(road_id)
+    return road_segment_handler.update_road_segment(
+        road_id, road_segment.model_dump(exclude_unset=True)
+    )
+
+
+@app.delete(
+    "/api/v1/road-segments/{road_id}",
+    response_model=RoadSegmentDeleteResponse,
+    response_description="Road segment deleted.",
+    responses={404: {"description": "road_id does not exist."}},
+    tags=["Road Segments"],
+)
+def delete_road_segment(road_id: int):
+    validate_road_id(road_id)
+    return road_segment_handler.delete_road_segment(road_id)
+
+
+# ---------------------------------------------------------
 # Location Ping REST API
 # ---------------------------------------------------------
 
@@ -977,6 +1103,23 @@ async def validation_exception_handler(
         )
 
 
+    # Road Segment validation - rubric section 5.2
+    if path == "/api/v1/road-segments" or path.startswith("/api/v1/road-segments/"):
+        if path == "/api/v1/road-segments/geojson":
+            return JSONResponse(
+                status_code=422,
+                content={"detail": "A query parameter fails type or range validation."},
+            )
+        if any(error.get("loc", [None])[0] == "path" for error in errors):
+            detail = "road_id must be a positive integer."
+        elif method == "GET":
+            detail = "Invalid query parameter values."
+        elif method == "PUT":
+            detail = "Malformed JSON or empty patch payload."
+        else:
+            detail = "Malformed geometry or invalid JSON."
+        return JSONResponse(status_code=400, content={"detail": detail})
+
     # Location Ping validation - rubric section 5.4
 
     if (
@@ -1172,6 +1315,12 @@ def custom_openapi():
             for method, details in methods.items():
                 if isinstance(details, dict) and method.lower() != "put":
                     details.get("responses", {}).pop("422", None)
+
+        # Road segment rubric documents HTTP 422 only for the GeoJSON export.
+        if path.startswith("/api/v1/road-segments") and path != "/api/v1/road-segments/geojson":
+            for method_details in methods.values():
+                if isinstance(method_details, dict):
+                    method_details.get("responses", {}).pop("422", None)
 
         # Location ping rubric does not document HTTP 422.
         if path.startswith("/api/v1/location-pings"):
