@@ -758,7 +758,7 @@ def validate_trip_id(trip_id: int):
 @app.post(
     "/api/v1/trips",
     response_model=TripResponse,
-    status_code=201,
+    status_code=201, response_description="Trip created successfully.",
     responses={400: {"description": "Malformed geometry or invalid JSON."},
                404: {"description": "vehicle_id does not exist."}},
     tags=["Trips"],
@@ -769,7 +769,7 @@ def create_trip(trip: TripCreate):
 
 @app.get(
     "/api/v1/trips",
-    response_model=TripListResponse,
+    response_model=TripListResponse, response_description="Trip collection returned.",
     responses={400: {"description": "Invalid query parameter values."}},
     tags=["Trips"],
 )
@@ -785,7 +785,7 @@ def get_trips(
 
 @app.get(
     "/api/v1/trips/{trip_id}",
-    response_model=TripResponse,
+    response_model=TripResponse, response_description="Trip returned successfully.",
     responses={404: {"description": "trip_id does not exist."}},
     tags=["Trips"],
 )
@@ -796,7 +796,7 @@ def get_trip(trip_id: int):
 
 @app.put(
     "/api/v1/trips/{trip_id}",
-    response_model=TripResponse,
+    response_model=TripResponse, response_description="Trip updated successfully.",
     responses={400: {"description": "Malformed JSON or empty patch payload."},
                404: {"description": "trip_id or referenced vehicle_id does not exist."},
                422: {"description": "Validation failed."}},
@@ -809,7 +809,7 @@ def update_trip(trip_id: int, trip: TripUpdate):
 
 @app.delete(
     "/api/v1/trips/{trip_id}",
-    response_model=TripDeleteResponse,
+    response_model=TripDeleteResponse, response_description="Trip deleted.",
     responses={404: {"description": "trip_id does not exist."}},
     tags=["Trips"],
 )
@@ -820,11 +820,12 @@ def delete_trip(trip_id: int):
 
 @app.get(
     "/api/v1/vehicles/{vehicle_id}/trips",
-    response_model=VehicleTripListResponse,
-    responses={400: {"description": "Invalid query parameter values."},
+    response_model=VehicleTripListResponse, response_description="Vehicle trips returned.",
+    responses={400: {"description": "Invalid query parameters."},
                404: {"description": "vehicle_id does not exist."}},
     tags=["Trips"],
 )
+
 def get_vehicle_trips(
     vehicle_id: int,
     limit: str = Query(default="20"),
@@ -833,8 +834,23 @@ def get_vehicle_trips(
     to_ts: str | None = None,
 ):
     if vehicle_id <= 0:
-        raise HTTPException(status_code=400, detail="Invalid query parameter values.")
-    return trip_handler.get_vehicle_trips(vehicle_id, limit, offset, from_ts, to_ts)
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid query parameters.",
+        )
+
+    try:
+        return trip_handler.get_vehicle_trips(
+            vehicle_id, limit, offset, from_ts, to_ts
+        )
+    except HTTPException as exc:
+        if exc.status_code == 400:
+            raise HTTPException(
+                status_code=400,
+                detail="Invalid query parameters.",
+            ) from exc
+        raise
+
 
 
 # ---------------------------------------------------------
@@ -930,19 +946,36 @@ async def validation_exception_handler(
     if path == "/api/v1/trips" or path.startswith("/api/v1/trips/") or (
         path.startswith("/api/v1/vehicles/") and path.endswith("/trips")
     ):
-        if any(error.get("loc", [None])[0] == "path" for error in errors):
+        is_vehicle_trip_history = (
+            path.startswith("/api/v1/vehicles/")
+            and path.endswith("/trips")
+        )
+
+        if any(
+            error.get("loc", [None])[0] == "path"
+            for error in errors
+        ):
             detail = (
                 "trip_id must be a positive integer."
                 if path.startswith("/api/v1/trips/")
-                else "Invalid query parameter values."
+                else "Invalid query parameters."
             )
         elif method == "GET":
-            detail = "Invalid query parameter values."
+            detail = (
+                "Invalid query parameters."
+                if is_vehicle_trip_history
+                else "Invalid query parameter values."
+            )
         elif method == "PUT":
             detail = "Malformed JSON or empty patch payload."
         else:
             detail = "Malformed geometry or invalid JSON."
-        return JSONResponse(status_code=400, content={"detail": detail})
+
+        return JSONResponse(
+            status_code=400,
+            content={"detail": detail},
+        )
+
 
     # Location Ping validation - rubric section 5.4
 

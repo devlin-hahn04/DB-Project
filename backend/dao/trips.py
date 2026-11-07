@@ -142,9 +142,23 @@ class TripListResponse(BaseModel):
     offset: int
     count: int
 
+class VehicleTripListItem(BaseModel):
+    trip_id: int
+    start_ts: datetime
+    end_ts: datetime
+    distance_km: float | None = None
 
-class VehicleTripListResponse(TripListResponse):
+    @field_serializer("start_ts", "end_ts")
+    def serialize_time(self, value: datetime) -> str:
+        return to_rfc3339(value)
+
+
+class VehicleTripListResponse(BaseModel):
     vehicle_id: int
+    items: list[VehicleTripListItem]
+    limit: int
+    offset: int
+    count: int
 
 
 class TripDeleteResponse(BaseModel):

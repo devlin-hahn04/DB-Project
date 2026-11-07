@@ -93,13 +93,15 @@ class TripIntegrationTests(unittest.TestCase):
                 self.assertEqual(data[field]["type"], "Point")
                 self.assertEqual(len(data[field]["coordinates"]), 2)
 
+    
     def test_03_vehicle_history(self):
         path = f"/vehicles/{self.vehicle_id}/trips"
         status, data = request(path=path, params={"limit": 5, "offset": 0})
         self.assertEqual(status, 200, data)
         self.assertEqual(data["vehicle_id"], self.vehicle_id)
-        self.assertTrue(all(i["vehicle_id"] == self.vehicle_id for i in data["items"]))
+        self.assertTrue(all("vehicle_id" not in i for i in data["items"]))
         self.assertLessEqual(len(data["items"]), 5)
+
 
     def test_04_create_read_update_delete_with_points(self):
         trip_id = None

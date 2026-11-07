@@ -5,7 +5,7 @@ import re
 from datetime import datetime
 
 from fastapi import HTTPException
-from psycopg2 import IntegrityError
+from psycopg2 import DataError, IntegrityError
 from psycopg2.errorcodes import CHECK_VIOLATION, FOREIGN_KEY_VIOLATION, NOT_NULL_VIOLATION
 
 from backend.dao.trips import TIMESTAMP_PATTERN, TripDAO, normalize_timestamp
@@ -99,17 +99,31 @@ class TripHandler:
     def create_trip(self, data):
         data = self._normalize_data(data)
         self._check_interval(data)
+
         try:
             self._check_vehicle(data["vehicle_id"])
             new_id = self.dao.create_trip(data)
             return self.dao.get_trip_by_id(new_id)
+
         except HTTPException:
             raise
+
         except IntegrityError as error:
             self._db_error(error)
+
+        except DataError as error:
+            logger.warning("Invalid Trip creation data: %s", error)
+            raise HTTPException(
+                status_code=400,
+                detail=CREATE_ERROR,
+            ) from error
+
         except Exception as error:
             logger.exception("Trip creation failed")
-            raise HTTPException(status_code=500, detail="Internal server error") from error
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error",
+            ) from error
 
     def get_trips(self, limit, offset, vehicle_id=None, from_ts=None, to_ts=None):
         limit, offset, vehicle_id, from_ts, to_ts = self._parse_filters(
@@ -135,33 +149,57 @@ class TripHandler:
     def update_trip(self, trip_id, changes):
         if not changes:
             raise HTTPException(status_code=400, detail=UPDATE_ERROR)
+
         for field in ("vehicle_id", "start_ts", "end_ts"):
             if field in changes and changes[field] is None:
                 raise HTTPException(status_code=400, detail=UPDATE_ERROR)
+
         changes = self._normalize_data(changes)
+
         try:
             existing = self.dao.get_trip_by_id(trip_id)
+
             if existing is None:
                 raise HTTPException(
-                    status_code=404, detail="trip_id or referenced vehicle_id does not exist."
+                    status_code=404,
+                    detail="trip_id or referenced vehicle_id does not exist."
                 )
+
             merged = {**existing, **changes}
             self._check_interval(merged, update=True)
+
             if "vehicle_id" in changes:
                 self._check_vehicle(changes["vehicle_id"], update=True)
+
             updated = self.dao.update_trip(trip_id, changes)
+
             if not updated:
                 raise HTTPException(
-                    status_code=404, detail="trip_id or referenced vehicle_id does not exist."
+                    status_code=404,
+                    detail="trip_id or referenced vehicle_id does not exist."
                 )
+
             return self.dao.get_trip_by_id(trip_id)
+
         except HTTPException:
             raise
+
         except IntegrityError as error:
             self._db_error(error, update=True)
+
+        except DataError as error:
+            logger.warning("Invalid Trip update data: %s", error)
+            raise HTTPException(
+                status_code=400,
+                detail=UPDATE_ERROR,
+            ) from error
+
         except Exception as error:
             logger.exception("Trip update failed")
-            raise HTTPException(status_code=500, detail="Internal server error") from error
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error"
+            ) from error
 
     def delete_trip(self, trip_id):
         try:
