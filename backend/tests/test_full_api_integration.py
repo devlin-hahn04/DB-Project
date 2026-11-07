@@ -27,6 +27,7 @@ A = API + "/vehicle-assignments"
 P = API + "/location-pings"
 PA = API + "/parking-areas"
 T = API + "/trips"
+RS = API + "/road-segments"
 MISSING = 999999999
 START = "2032-05-20T12:00:00Z"
 END = "2032-05-20T13:00:00Z"
@@ -203,6 +204,38 @@ EXPECTED.update({
 })
 
 
+# Road Segment rubric (Section 5.2): 15 additional response codes.
+EXPECTED.update({
+    ("/api/v1/road-segments", "post"): {
+        "201": "Road segment created successfully.",
+        "400": "Malformed geometry or invalid JSON.",
+    },
+    ("/api/v1/road-segments", "get"): {
+        "200": "Road segment collection returned.",
+        "400": "Invalid query parameter values.",
+    },
+    ("/api/v1/road-segments/{road_id}", "get"): {
+        "200": "Road segment returned.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/{road_id}", "put"): {
+        "200": "Road segment updated successfully.",
+        "400": "Malformed JSON or empty patch payload.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/{road_id}", "delete"): {
+        "200": "Road segment deleted.",
+        "404": "road_id does not exist.",
+    },
+    ("/api/v1/road-segments/geojson", "get"): {
+        "200": "GeoJSON FeatureCollection returned successfully.",
+        "400": "Invalid or inconsistent filter values.",
+        "422": "A query parameter fails type or range validation.",
+        "500": "The service could not complete the request.",
+    },
+})
+
+
 def http(method, url, body=None, params=None, raw=None):
     """Send an HTTP request and return status plus decoded JSON."""
     if params is not None:
@@ -305,7 +338,7 @@ class ProfessorGrader(unittest.TestCase):
                 "is not cartracking_test."
             )
 
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             status, response = http("GET", url, params={"limit": 1})
             if status != 200 or not response.get("items"):
                 raise RuntimeError("Populated test database required: " + url)
@@ -501,7 +534,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 91)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 106)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -514,7 +547,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(actual, expected)
 
     def test_02_all_list_shapes_and_zero_limit(self):
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             with self.subTest(url=url):
                 response = self.call(
                     "GET", url, 200,
@@ -1110,7 +1143,7 @@ class ProfessorGrader(unittest.TestCase):
                 self.assertEqual(status, 404)
 
     def test_19_invalid_query_and_path_boundaries(self):
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             with self.subTest(url=url):
                 self.call(
                     "GET", url, 400,
@@ -1121,6 +1154,7 @@ class ProfessorGrader(unittest.TestCase):
         for url, message in [
             (P, "ping_id must be a positive integer."),
             (A, "assignment_id must be a positive integer."),
+            (RS, "road_id must be a positive integer."),
         ]:
             with self.subTest(url=url):
                 self.call(
@@ -1136,7 +1170,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_20_cleanup_and_preservation(self):
         self.cleanup()
 
-        for url in (D, V, A, P, PA, T):
+        for url in (D, V, A, P, PA, T, RS):
             response = self.call(
                 "GET", url, 200,
                 params={"limit": 0}
