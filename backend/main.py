@@ -419,7 +419,7 @@ def update_vehicle(vehicle_id: int, vehicle: VehicleUpdate):
     response_description="Vehicle deleted successfully.",
     responses={
         404: {"description": "vehicle_id does not exist."},
-        409: {"description": "Deletion is blocked by business rules/foreign key constraints."},
+        409: {"description": "Deletion is blocked by business rules /foreign key constraints."},
     },
     tags=["Vehicles"],
 )
@@ -1209,6 +1209,7 @@ async def validation_exception_handler(
                 "model_type",
                 "dict_type",
                 "list_type",
+                "extra_forbidden",
             )
             for error in errors
         )

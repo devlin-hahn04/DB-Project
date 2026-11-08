@@ -168,6 +168,8 @@ class TripIntegrationTests(unittest.TestCase):
     def test_07_invalid_create_requests(self):
         base = self.payload()
         for changes, expected in [
+            ({"start_ts": "2031-01-01T10:00:00"}, 400),
+            ({"end_ts": "2031-01-01T10:30:00"}, 400),
             ({"end_ts": "2031-01-01T09:00:00Z"}, 400),
             ({"end_ts": "2031-01-01T10:00:00Z"}, 400),
             ({"distance_km": -5}, 400),
@@ -185,6 +187,7 @@ class TripIntegrationTests(unittest.TestCase):
             {"offset": -1}, {"limit": -1}, {"vehicle_id": 0},
             {"from_ts": "2031-01-02T00:00:00Z", "to_ts": "2031-01-01T00:00:00Z"},
             {"from_ts": "not-a-date"},
+            {"from_ts": "2031-01-01T10:00:00"},
         ]:
             with self.subTest(params=params):
                 self.assert_error(400, params=params)
@@ -192,6 +195,11 @@ class TripIntegrationTests(unittest.TestCase):
         self.assert_error(400, path="/trips/0")
         self.assert_error(400, path="/trips/abc")
         self.assert_error(404, path="/vehicles/999999/trips")
+        self.assert_error(
+            400,
+            path=f"/vehicles/{self.vehicle_id}/trips",
+            params={"from_ts": "2031-01-01T10:00:00"},
+        )
 
     def test_09_invalid_updates_do_not_change_data(self):
         trip_id = None
@@ -200,6 +208,9 @@ class TripIntegrationTests(unittest.TestCase):
             trip_id = created["trip_id"]
             self.assert_error(400, "PUT", f"/trips/{trip_id}", {})
             self.assert_error(400, "PUT", f"/trips/{trip_id}", {"distance_km": -1})
+            self.assert_error(400, "PUT", f"/trips/{trip_id}", {
+                "end_ts": "2031-01-01T10:45:00"
+            })
             self.assert_error(422, "PUT", f"/trips/{trip_id}", {
                 "end_ts": "2031-01-01T09:59:00Z"
             })

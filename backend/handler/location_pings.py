@@ -57,8 +57,8 @@ class LocationPingHandler:
         return parsed
 
     def _parse_timestamp(self, value, detail):
-        # An unencoded "+" offset arrives as a space; restore it.
-        value = re.sub(r" (\d{2}:\d{2})$", r"+\1", value.strip())
+        # A raw "+" in a URL query is decoded as a space.
+        value = re.sub(r" (\d{2}:\d{2})$", r"+\1", value)
         if not TIMESTAMP_PATTERN.fullmatch(value):
             raise self._bad_query(detail)
         try:

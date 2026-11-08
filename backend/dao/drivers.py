@@ -1,4 +1,5 @@
 
+import re
 from datetime import datetime, timezone
 from typing import Annotated
 
@@ -24,30 +25,27 @@ NonEmptyText = Annotated[
 ]
 
 
-def validate_timestamp(value):
-    """
-    Require an RFC 3339 timestamp with timezone information.
+RFC3339_PATTERN = re.compile(
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})"
+)
 
-    Convert the timestamp to UTC and remove timezone information
-    because the PostgreSQL column uses TIMESTAMP WITHOUT TIME ZONE.
-    """
-    if not isinstance(value, str):
+
+def validate_timestamp(value):
+    """Validate and normalize an RFC 3339 timestamp to UTC-naive storage."""
+    if not isinstance(value, str) or not RFC3339_PATTERN.fullmatch(value):
         raise ValueError(
-            "hired_at must be an RFC 3339 timestamp string"
+            "hired_at must be an RFC 3339 timestamp with a timezone"
         )
 
     try:
-        parsed = datetime.fromisoformat(value)
+        parsed = datetime.fromisoformat(value.replace("z", "Z"))
     except ValueError as error:
         raise ValueError(
             "hired_at must be a valid RFC 3339 timestamp"
         ) from error
 
-    if (
-        "T" not in value
-        or parsed.tzinfo is None
-        or parsed.utcoffset() is None
-    ):
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(
             "hired_at must include a timezone offset"
         )

@@ -121,8 +121,6 @@ class RoadSegmentListItem(BaseModel):
     road_id: int
     name: str
     speed_limit_kph: int | None = None
-    is_oneway: bool | None = None
-    direction: str | None = None
     created_at: datetime | None = None
 
     @field_serializer("created_at")
@@ -134,8 +132,6 @@ class RoadSegmentResponse(BaseModel):
     road_id: int
     name: str
     speed_limit_kph: int | None = None
-    is_oneway: bool | None = None
-    direction: str | None = None
     geom: dict[str, Any]
     created_at: datetime | None = None
 
@@ -193,13 +189,16 @@ class RoadSegmentDAO:
         road_id,
         name,
         speed_limit_kph,
-        is_oneway,
-        direction,
         created_at
     """
 
     DETAIL_COLUMNS = LIST_COLUMNS + """,
         ST_AsGeoJSON(geom)::json AS geom
+    """
+
+    CREATE_GEOJSON_COLUMNS = DETAIL_COLUMNS + """,
+        is_oneway,
+        direction
     """
 
     LINESTRING_SQL = "ST_SetSRID(ST_GeomFromGeoJSON(%s), 4326)"
@@ -272,7 +271,7 @@ class RoadSegmentDAO:
         self, limit, offset, name=None, min_speed_kph=None, max_speed_kph=None,
     ):
         return self._get_page(
-            self.DETAIL_COLUMNS, limit, offset, name=name,
+            self.CREATE_GEOJSON_COLUMNS, limit, offset, name=name,
             min_speed_kph=min_speed_kph, max_speed_kph=max_speed_kph,
         )
 
@@ -290,6 +289,21 @@ class RoadSegmentDAO:
             row = cursor.fetchone()
             result = dict(row) if row else None
             # Always close cursor
+            cursor.close()
+        return result
+
+    def get_road_segment_for_create(self, road_id) -> dict | None:
+        """Get road segment with is_oneway and direction for POST response."""
+        with get_db_connection() as conn:
+            cursor = conn.cursor(cursor_factory=RealDictCursor)
+            query = f"""
+                SELECT {self.CREATE_GEOJSON_COLUMNS}
+                FROM road_segment
+                WHERE road_id = %s
+            """
+            cursor.execute(query, (road_id,))
+            row = cursor.fetchone()
+            result = dict(row) if row else None
             cursor.close()
         return result
 

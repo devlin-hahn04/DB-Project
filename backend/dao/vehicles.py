@@ -20,6 +20,8 @@ from backend.config.dbconfig import get_db_connection
 # ---------------------------------------------------------
 
 class VehicleCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     vehicle_type_id: int = Field(gt=0)
     vehicle_status_id: int = Field(gt=0)
     plate_number: str = Field(min_length=1)
@@ -42,6 +44,8 @@ class VehicleCreate(BaseModel):
 
 
 class VehicleUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     vehicle_type_id: int | None = Field(default=None, gt=0)
     vehicle_status_id: int | None = Field(default=None, gt=0)
     plate_number: str | None = None

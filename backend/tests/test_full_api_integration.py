@@ -83,7 +83,7 @@ EXPECTED = {
         "200": "Vehicle deleted successfully.",
         "404": "vehicle_id does not exist.",
         
-        "409": "Deletion is blocked by business rules/foreign key constraints.",
+        "409": "Deletion is blocked by business rules /foreign key constraints.",
     },
     ("/api/v1/vehicles/{vehicle_id}/current-location", "get"): {
         "200": "Current location returned.",
@@ -601,6 +601,7 @@ class ProfessorGrader(unittest.TestCase):
                 "license_number", "hired_at"
             }
         )
+        self.assertEqual(driver["hired_at"], "2032-05-20T12:00:00Z")
 
         self.assertEqual(
             self.call("GET", f"{D}/{driver_id}", 200),
@@ -623,6 +624,12 @@ class ProfessorGrader(unittest.TestCase):
         )
 
         self.assertEqual(changed["first_name"], "Updated")
+
+        changed_time = self.call(
+            "PUT", f"{D}/{driver_id}", 200,
+            {"hired_at": "2032-05-21T08:00:00-04:00"}
+        )
+        self.assertEqual(changed_time["hired_at"], "2032-05-21T12:00:00Z")
 
         self.assertEqual(
             self.call("GET", f"{D}/{driver_id}", 200)["first_name"],
@@ -668,6 +675,14 @@ class ProfessorGrader(unittest.TestCase):
 
         self.assertEqual(self.call("GET", url, 200), before)
 
+        self.call(
+            "PUT", url, 422,
+            {"hired_at": "2032-05-20T12:00:00"},
+            detail="A supplied field is null or invalid."
+        )
+
+        self.assertEqual(self.call("GET", url, 200), before)
+
     def test_05_driver_invalid_inputs(self):
         self.call(
             "GET", f"{D}/{MISSING}", 404,
@@ -688,6 +703,17 @@ class ProfessorGrader(unittest.TestCase):
         self.call(
             "POST", D, 422,
             {"first_name": "A", "last_name": "B"},
+            detail="A required field is null or invalid."
+        )
+
+        self.call(
+            "POST", D, 422,
+            {
+                "first_name": "A",
+                "last_name": "B",
+                "license_number": "NO-TZ-" + uuid.uuid4().hex[:12],
+                "hired_at": "2032-05-20T12:00:00",
+            },
             detail="A required field is null or invalid."
         )
 
@@ -834,7 +860,7 @@ class ProfessorGrader(unittest.TestCase):
     # -------------------------------------------------------
 
     def test_10_ping_crud_geojson_and_persistence(self):
-        ping = self.new_ping()
+        ping = self.new_ping(ts="2032-05-20T08:00:00-04:00")
         url = f"{P}/{ping['ping_id']}"
 
         self.assertEqual(
@@ -846,13 +872,19 @@ class ProfessorGrader(unittest.TestCase):
         )
 
         self.assertEqual(ping["geom"], point())
+        self.assertEqual(ping["ts"], START)
         self.assertEqual(self.call("GET", url, 200), ping)
 
         updated = self.call(
             "PUT", url, 200,
-            {"speed_kph": 0, "heading_deg": 0}
+            {
+                "ts": "2032-05-20T09:00:00-04:00",
+                "speed_kph": 0,
+                "heading_deg": 0,
+            }
         )
 
+        self.assertEqual(updated["ts"], END)
         self.assertEqual(updated["speed_kph"], 0)
         self.assertEqual(updated["heading_deg"], 0)
         self.assertEqual(self.call("GET", url, 200), updated)
@@ -885,6 +917,7 @@ class ProfessorGrader(unittest.TestCase):
             {**template, "heading_deg": 360},
             {**template, "heading_deg": -0.1},
             {**template, "ts": "not-a-date"},
+            {**template, "ts": "2032-05-20T12:00:00"},
             {**template, "vehicle_id": 0},
         ]
 
@@ -910,6 +943,7 @@ class ProfessorGrader(unittest.TestCase):
             {"geom": None},
             {"heading_deg": 360},
             {"vehicle_id": None},
+            {"ts": "2032-05-20T12:00:00"},
             {"unknown": 5},
         ]
 
@@ -971,6 +1005,25 @@ class ProfessorGrader(unittest.TestCase):
             {x["ping_id"] for x in result["items"]}
         )
 
+        offset_result = self.call(
+            "GET", P, 200,
+            params={
+                **params,
+                "from_ts": "2032-05-20T08:00:00-04:00",
+                "to_ts": "2032-05-20T09:00:00-04:00",
+            }
+        )
+        self.assertEqual(
+            {x["ping_id"] for x in offset_result["items"]},
+            {p1["ping_id"], p2["ping_id"]}
+        )
+
+        self.call(
+            "GET", P, 400,
+            params={"from_ts": "2032-05-20T12:00:00"},
+            detail="Invalid query parameter values."
+        )
+
         excluded = self.call(
             "GET", P, 200,
             params={
@@ -1017,6 +1070,12 @@ class ProfessorGrader(unittest.TestCase):
         self.call(
             "GET", url, 400,
             params={"limit": -1},
+            detail="Invalid query parameters."
+        )
+
+        self.call(
+            "GET", url, 400,
+            params={"from_ts": "2032-05-20T12:00:00"},
             detail="Invalid query parameters."
         )
 
@@ -1072,7 +1131,7 @@ class ProfessorGrader(unittest.TestCase):
 
         self.call(
             "DELETE", f"{V}/{vehicle['vehicle_id']}", 409,
-            detail="Deletion is blocked by business rules/foreign key constraints."
+            detail="Deletion is blocked by business rules /foreign key constraints."
         )
 
         self.call(
@@ -1093,7 +1152,7 @@ class ProfessorGrader(unittest.TestCase):
 
         self.call(
             "DELETE", f"{V}/{vehicle['vehicle_id']}", 409,
-            detail="Deletion is blocked by business rules/foreign key constraints."
+            detail="Deletion is blocked by business rules /foreign key constraints."
         )
 
         self.call(
@@ -1567,6 +1626,12 @@ class ProfessorGrader(unittest.TestCase):
             "null vehicle id": {**valid, "vehicle_id": None},
             "zero vehicle id": {**valid, "vehicle_id": 0},
             "invalid start timestamp": {**valid, "start_ts": "not-a-date"},
+            "start timestamp without timezone": {
+                **valid, "start_ts": "2032-05-20T12:00:00"
+            },
+            "end timestamp without timezone": {
+                **valid, "end_ts": "2032-05-20T13:00:00"
+            },
             "impossible calendar date": {**valid, "start_ts": "2032-02-30T12:00:00Z"},
             "end equals start": {**valid, "end_ts": START},
             "end before start": {**valid, "start_ts": END, "end_ts": START},
@@ -1657,6 +1722,7 @@ class ProfessorGrader(unittest.TestCase):
             "null start timestamp": ({"start_ts": None}, 400, "Malformed JSON or empty patch payload."),
             "null end timestamp": ({"end_ts": None}, 400, "Malformed JSON or empty patch payload."),
             "invalid timestamp": ({"end_ts": "not-a-date"}, 400, "Malformed JSON or empty patch payload."),
+            "timestamp without timezone": ({"end_ts": "2032-05-20T13:05:00"}, 400, "Malformed JSON or empty patch payload."),
             "invalid geometry": ({"start_geom": point(181, 18)}, 400, "Malformed JSON or empty patch payload."),
             "wrong geometry type": ({"end_geom": {"type": "LineString", "coordinates": []}}, 400, "Malformed JSON or empty patch payload."),
             "unknown field": ({"not_a_trip_column": 1}, 400, "Malformed JSON or empty patch payload."),
@@ -1751,6 +1817,17 @@ class ProfessorGrader(unittest.TestCase):
         self.assertEqual([x["trip_id"] for x in exact["items"]], [ids[1]])
         self.assertEqual(exact["count"], 1)
 
+        offset_exact = self.call("GET", T, 200, params={
+            "vehicle_id": vehicle_id,
+            "from_ts": "2032-05-20T09:00:00-04:00",
+            "to_ts": "2032-05-20T09:00:00-04:00",
+            "limit": 10,
+        })
+        self.assertEqual(
+            [x["trip_id"] for x in offset_exact["items"]],
+            [ids[1]],
+        )
+
         combined = self.call("GET", T, 200, params={
             "vehicle_id": vehicle_id,
             "from_ts": "2032-05-20T12:30:00Z",
@@ -1807,6 +1884,12 @@ class ProfessorGrader(unittest.TestCase):
         self.assertEqual(filtered["count"], 2)
 
         self.call(
+            "GET", url, 400,
+            params={"from_ts": "2032-05-20T13:00:00"},
+            detail="Invalid query parameters.",
+        )
+
+        self.call(
             "GET", f"{V}/{MISSING}/trips", 404,
             detail="vehicle_id does not exist.",
         )
@@ -1823,6 +1906,7 @@ class ProfessorGrader(unittest.TestCase):
             {"vehicle_id": 0},
             {"vehicle_id": "abc"},
             {"from_ts": "not-a-date"},
+            {"from_ts": "2032-05-20T13:00:00"},
             {"from_ts": "2032-02-30T10:00:00Z"},
             {"from_ts": "2032-05-21T13:00:00Z", "to_ts": "2032-05-21T12:00:00Z"},
         ]
@@ -1851,7 +1935,7 @@ class ProfessorGrader(unittest.TestCase):
         # A trip's FK must prevent deleting its vehicle.
         self.call(
             "DELETE", vehicle_url, 409,
-            detail="Deletion is blocked by business rules/foreign key constraints.",
+            detail="Deletion is blocked by business rules /foreign key constraints.",
         )
         self.assertEqual(self.call("GET", trip_url, 200), trip)
 
@@ -1982,7 +2066,22 @@ class ProfessorGrader(unittest.TestCase):
             200,
         )
 
-        self.assertEqual(fetched, first)
+        # GET by ID should omit is_oneway and direction (rubric example)
+        self.assertEqual(
+            set(fetched),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "geom",
+                "created_at",
+            },
+        )
+        self.assertEqual(fetched["road_id"], first["road_id"])
+        self.assertEqual(fetched["name"], first["name"])
+        self.assertEqual(fetched["speed_limit_kph"], first["speed_limit_kph"])
+        self.assertEqual(fetched["geom"], first["geom"])
+        self.assertEqual(fetched["created_at"], first["created_at"])
 
     # -------------------------------------------------------
     # 47. POST: Optional fields and name normalization
@@ -2020,7 +2119,22 @@ class ProfessorGrader(unittest.TestCase):
             200,
         )
 
-        self.assertEqual(fetched, created)
+        # GET by ID should omit is_oneway and direction (rubric example)
+        self.assertEqual(
+            set(fetched),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "geom",
+                "created_at",
+            },
+        )
+        self.assertEqual(fetched["road_id"], created["road_id"])
+        self.assertEqual(fetched["name"], created["name"])
+        self.assertEqual(fetched["speed_limit_kph"], created["speed_limit_kph"])
+        self.assertEqual(fetched["geom"], created["geom"])
+        self.assertEqual(fetched["created_at"], created["created_at"])
 
     # -------------------------------------------------------
     # 48. POST: Adversarial invalid payload matrix
@@ -2276,8 +2390,6 @@ class ProfessorGrader(unittest.TestCase):
                 "road_id",
                 "name",
                 "speed_limit_kph",
-                "is_oneway",
-                "direction",
                 "created_at",
             },
         )
@@ -2585,19 +2697,21 @@ class ProfessorGrader(unittest.TestCase):
             80,
         )
 
-        for field in (
-            "road_id",
-            "name",
-            "is_oneway",
-            "direction",
-            "geom",
-            "created_at",
-        ):
-            self.assertEqual(
-                partial[field],
-                road[field],
-                field,
-            )
+        # PUT response should omit is_oneway and direction (rubric example)
+        self.assertEqual(
+            set(partial),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "geom",
+                "created_at",
+            },
+        )
+        self.assertEqual(partial["road_id"], road["road_id"])
+        self.assertEqual(partial["name"], road["name"])
+        self.assertEqual(partial["geom"], road["geom"])
+        self.assertEqual(partial["created_at"], road["created_at"])
 
         # Full update.
         new_geom = self.road_line(
@@ -2621,13 +2735,20 @@ class ProfessorGrader(unittest.TestCase):
             changes,
         )
 
-        for field, value in changes.items():
-            self.assertEqual(
-                updated[field],
-                value,
-                field,
-            )
-
+        # PUT response should omit is_oneway and direction (rubric example)
+        self.assertEqual(
+            set(updated),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "geom",
+                "created_at",
+            },
+        )
+        self.assertEqual(updated["name"], changes["name"])
+        self.assertEqual(updated["speed_limit_kph"], changes["speed_limit_kph"])
+        self.assertEqual(updated["geom"], changes["geom"])
         self.assertEqual(
             updated["created_at"],
             road["created_at"],
@@ -2645,15 +2766,21 @@ class ProfessorGrader(unittest.TestCase):
             200,
             {
                 "speed_limit_kph": None,
-                "is_oneway": None,
-                "direction": None,
             },
         )
 
+        # PUT response should omit is_oneway and direction (rubric example)
+        self.assertEqual(
+            set(cleared),
+            {
+                "road_id",
+                "name",
+                "speed_limit_kph",
+                "geom",
+                "created_at",
+            },
+        )
         self.assertIsNone(cleared["speed_limit_kph"])
-        self.assertIsNone(cleared["is_oneway"])
-        self.assertIsNone(cleared["direction"])
-
         self.assertEqual(
             cleared["geom"],
             new_geom,
