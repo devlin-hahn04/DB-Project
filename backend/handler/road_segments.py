@@ -186,7 +186,7 @@ class RoadSegmentHandler:
         new_road = self._to_dao_data(new_road)
         try:
             road_id = self.dao.create_road_segment(new_road)
-            return self.dao.get_road_segment_by_id(road_id)
+            return self.dao.get_road_segment_for_create(road_id)
         except PsycopgError as error:
             raise self._database_error(
                 error, CREATE_ERROR, "Road segment creation failed"

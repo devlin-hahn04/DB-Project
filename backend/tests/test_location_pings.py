@@ -104,12 +104,13 @@ class LocationPingIntegrationTests(unittest.TestCase):
         finally:
             self.delete(data["ping_id"])
 
-    def test_create_accepts_spec_timestamp_without_offset_as_utc(self):
-        data = self.create(ts="2031-01-01T09:58:20")
-        try:
-            self.assertEqual(data["ts"], "2031-01-01T09:58:20Z")
-        finally:
-            self.delete(data["ping_id"])
+    def test_create_rejects_timestamp_without_timezone(self):
+        status, data = request(
+            "POST",
+            payload=self.make_payload(ts="2031-01-01T09:58:20"),
+        )
+        self.assertEqual(status, 400, data)
+        self.assertEqual(data["detail"], "Malformed geometry or invalid JSON.")
 
     def test_create_normalizes_offset_to_utc(self):
         data = self.create(ts="2031-01-01T06:00:00-04:00")
@@ -242,6 +243,7 @@ class LocationPingIntegrationTests(unittest.TestCase):
                 "heading 360": {"heading_deg": 360},
                 "polygon": {"geom": {"type": "Polygon", "coordinates": [[[0, 0], [1, 0], [1, 1], [0, 0]]]}},
                 "invalid ts": {"ts": "yesterday"},
+                "ts without timezone": {"ts": "2031-01-02T08:30:00"},
             }
             for name, payload in cases.items():
                 with self.subTest(name):
@@ -337,6 +339,7 @@ class LocationPingIntegrationTests(unittest.TestCase):
             "vehicle_id zero": {"vehicle_id": 0},
             "vehicle_id text": {"vehicle_id": "x"},
             "invalid from_ts": {"from_ts": "not-a-date"},
+            "from_ts without timezone": {"from_ts": "2031-01-01T10:00:00"},
             "reversed range": {"from_ts": "2031-01-02T00:00:00Z", "to_ts": "2031-01-01T00:00:00Z"},
             "bbox three values": {"bbox": "-65.6,18.3,-65.4"},
             "bbox text": {"bbox": "a,b,c,d"},
@@ -394,6 +397,7 @@ class LocationPingIntegrationTests(unittest.TestCase):
             {"limit": -1},
             {"offset": "x"},
             {"from_ts": "bad"},
+            {"from_ts": "2031-01-01T10:00:00"},
             {"from_ts": "2031-01-02T00:00:00Z", "to_ts": "2031-01-01T00:00:00Z"},
         ):
             with self.subTest(params):

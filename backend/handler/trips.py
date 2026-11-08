@@ -35,8 +35,8 @@ class TripHandler:
 
     @staticmethod
     def _parse_timestamp(value):
-        # Raw '+' in a URL query can become a space; handle that safely.
-        value = re.sub(r" (\d{2}:\d{2})$", r"+\1", value.strip())
+        # A raw "+" in a URL query is decoded as a space.
+        value = re.sub(r" (\d{2}:\d{2})$", r"+\1", value)
         if not TIMESTAMP_PATTERN.fullmatch(value):
             raise HTTPException(status_code=400, detail=QUERY_ERROR)
         try:

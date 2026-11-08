@@ -152,7 +152,7 @@ class VehicleHandler:
                 raise HTTPException(
                     status_code=409,
                     detail=(
-                        "Deletion is blocked by business rules/"
+                        "Deletion is blocked by business rules /"
                         "foreign key constraints."
                     ),
                 ) from error

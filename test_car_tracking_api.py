@@ -629,7 +629,7 @@ def test_driver_crud(t):
         assert isinstance(body["driver_id"], int)
         assert body["first_name"] == "Integration"
         assert body["license_number"] == license_number
-        assert body["hired_at"]
+        assert body["hired_at"] == "2026-10-01T14:30:00Z"
 
         created["id"] = body["driver_id"]
 
@@ -701,9 +701,9 @@ def test_driver_crud(t):
     )
 
     t.check(
-        "POST extra field returns 422",
+        "POST extra field returns 400",
         lambda: t.expect(
-            "POST", root, 422,
+            "POST", root, 400,
             data={
                 **payload,
                 "unknown_field": "invalid",

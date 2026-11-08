@@ -12,7 +12,8 @@ from psycopg2.extras import RealDictCursor
 from backend.config.dbconfig import get_db_connection
 
 TIMESTAMP_PATTERN = re.compile(
-    r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})?"
+    r"\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}"
+    r"(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2})"
 )
 
 
@@ -25,9 +26,13 @@ def require_timestamp_string(value):
 
 
 def normalize_timestamp(value: datetime | None) -> datetime | None:
-    """Legacy PostgreSQL TIMESTAMP columns store UTC without a timezone."""
-    if value is None or value.tzinfo is None or value.utcoffset() is None:
-        return value
+    """Convert a timezone-aware value to UTC-naive TIMESTAMP storage."""
+    if value is None:
+        return None
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(
+            "A valid RFC 3339 timestamp must include a timezone offset."
+        )
     return value.astimezone(timezone.utc).replace(tzinfo=None)
 
 
