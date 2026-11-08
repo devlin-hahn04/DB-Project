@@ -51,6 +51,10 @@ def value_matches(source, database, column):
         return as_ewkb_bytes(source) == as_ewkb_bytes(database)
     if source is None or database is None:
         return source is None and database is None
+    if isinstance(source, datetime) and isinstance(database, datetime):
+        # Parquet nanosecond timestamps deserialize to pandas.Timestamp, a
+        # datetime subclass, while psycopg returns datetime.datetime.
+        return source == database
     if isinstance(source, float):
         if isinstance(database, float) and math.isnan(source) and math.isnan(database):
             return True

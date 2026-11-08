@@ -14,3 +14,6 @@ validate.py
 
 envs/.env.local
 envs/.env.render
+
+# Local API testing scripts
+/backend/tests/
