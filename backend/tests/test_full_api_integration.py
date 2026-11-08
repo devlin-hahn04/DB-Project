@@ -236,6 +236,29 @@ EXPECTED.update({
 })
 
 
+PAGINATION_DEFAULTS = {
+    ("/api/v1/drivers", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/vehicles", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/vehicle-assignments", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/parking-areas", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/road-segments", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/road-segments/geojson", "get"): {
+        "limit": 15000,
+        "offset": 0,
+    },
+    ("/api/v1/location-pings", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/vehicles/{vehicle_id}/pings", "get"): {
+        "limit": 20,
+        "offset": 0,
+    },
+    ("/api/v1/trips", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/vehicles/{vehicle_id}/trips", "get"): {
+        "limit": 20,
+        "offset": 0,
+    },
+}
+
+
 def http(method, url, body=None, params=None, raw=None):
     """Send an HTTP request and return status plus decoded JSON."""
     if params is not None:
@@ -555,6 +578,29 @@ class ProfessorGrader(unittest.TestCase):
                 }
 
                 self.assertEqual(actual, expected)
+
+        pagination_parameter_count = 0
+        for (path, method), defaults in PAGINATION_DEFAULTS.items():
+            with self.subTest(path=path, method=method, contract="pagination"):
+                parameters = {
+                    parameter["name"]: parameter
+                    for parameter in spec["paths"][path][method]["parameters"]
+                }
+
+                for name, default in defaults.items():
+                    parameter = parameters[name]
+                    schema = parameter["schema"]
+
+                    self.assertEqual(parameter["in"], "query")
+                    self.assertFalse(parameter["required"])
+                    self.assertEqual(schema["type"], "integer")
+                    self.assertEqual(schema["minimum"], 0)
+                    self.assertEqual(schema["default"], default)
+                    self.assertIsInstance(schema["default"], int)
+                    self.assertNotIn("maximum", schema)
+                    pagination_parameter_count += 1
+
+        self.assertEqual(pagination_parameter_count, 20)
 
     def test_02_all_list_shapes_and_zero_limit(self):
         for url in (D, V, A, P, PA, T, RS):

@@ -137,6 +137,18 @@ def parse_nonnegative_integer(value: str, field_name: str):
     return int(value)
 
 
+def pagination_query(default: int):
+    """Document pagination as an integer while preserving raw string validation."""
+    return Query(
+        default_factory=lambda: str(default),
+        json_schema_extra={
+            "type": "integer",
+            "minimum": 0,
+            "default": default,
+        },
+    )
+
+
 # ---------------------------------------------------------
 # POST /api/v1/drivers
 # ---------------------------------------------------------
@@ -179,8 +191,8 @@ def create_driver(driver: DriverCreate):
     tags=["Drivers"],
 )
 def get_drivers(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     name: str | None = None,
     license_number: str | None = None,
 ):
@@ -344,8 +356,8 @@ def create_vehicle(vehicle: VehicleCreate):
     tags=["Vehicles"],
 )
 def get_vehicles(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     plate_number: str | None = None,
     status: str | None = None,
 ):
@@ -488,8 +500,8 @@ def create_assignment(assignment: AssignmentCreate):
     tags=["Vehicle Assignments"],
 )
 def get_assignments(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     vehicle_id: str | None = None,
     driver_id: str | None = None,
     active: str | None = None,
@@ -591,8 +603,8 @@ def create_parking_area(parking_area: ParkingAreaCreate):
     tags=["Parking Areas"],
 )
 def get_parking_areas(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     name: str | None = None,
     bbox: str | None = None,
 ):
@@ -683,8 +695,8 @@ def create_road_segment(road_segment: RoadSegmentCreate):
     tags=["Road Segments"],
 )
 def get_road_segments(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     name: str | None = None,
     min_speed_kph: str | None = None,
     max_speed_kph: str | None = None,
@@ -709,8 +721,8 @@ def get_road_segments(
     tags=["Road Segments"],
 )
 def get_road_segments_geojson(
-    limit: str = Query(default="15000"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(15000),
+    offset: str = pagination_query(0),
     name: str | None = None,
     min_speed_kph: str | None = None,
     max_speed_kph: str | None = None,
@@ -798,8 +810,8 @@ def create_location_ping(ping: LocationPingCreate):
     tags=["Location Pings"],
 )
 def get_location_pings(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     vehicle_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
@@ -859,8 +871,8 @@ def delete_location_ping(ping_id: int):
 )
 def get_vehicle_pings(
     vehicle_id: int,
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     from_ts: str | None = None,
     to_ts: str | None = None,
 ):
@@ -900,8 +912,8 @@ def create_trip(trip: TripCreate):
     tags=["Trips"],
 )
 def get_trips(
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     vehicle_id: str | None = None,
     from_ts: str | None = None,
     to_ts: str | None = None,
@@ -954,8 +966,8 @@ def delete_trip(trip_id: int):
 
 def get_vehicle_trips(
     vehicle_id: int,
-    limit: str = Query(default="20"),
-    offset: str = Query(default="0"),
+    limit: str = pagination_query(20),
+    offset: str = pagination_query(0),
     from_ts: str | None = None,
     to_ts: str | None = None,
 ):
