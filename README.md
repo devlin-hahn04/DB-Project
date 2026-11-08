@@ -11,7 +11,7 @@ The project uses PostgreSQL and PostGIS to store structured and spatial data. It
 | Phase | Scope | Status |
 |---|---|---|
 | **Phase 1** | Design and initialize a PostgreSQL/PostGIS database; load the 11 supplied Parquet datasets using a reproducible Python ETL pipeline; validate relational and spatial data; and deploy a populated database to Render for remote access and grading. | Completed |
-| **Phase 2** | To be documented when Phase 2 requirements are provided. | Pending |
+| **Phase 2** | Develop and deploy a REST API using Python, FastAPI, and a Handler/DAO architecture; implement 39 HTTP operations across seven resources with CRUD functionality, validation, pagination, filtering, and PostGIS spatial queries; and verify API functionality against the Render-hosted PostgreSQL database. | Completed |
 | **Phase 3** | To be documented when Phase 3 requirements are provided. | Pending |
 
 ## Phase Documentation
