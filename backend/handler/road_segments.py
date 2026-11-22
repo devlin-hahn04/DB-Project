@@ -136,34 +136,106 @@ class RoadSegmentHandler:
         return {"items": items, "limit": parsed_limit, "offset": parsed_offset, "count": count}
 
     def get_road_segments_geojson(
-        self, limit, offset, name=None, min_speed_kph=None, max_speed_kph=None, bbox=None,
+        self,
+        limit,
+        offset,
+        name=None,
+        min_speed_kph=None,
+        max_speed_kph=None,
+        bbox=None,
     ):
-        # This endpoint does not accept a bbox parameter.
-        if bbox is not None:
-            raise HTTPException(status_code=400, detail=GEOJSON_FILTER_ERROR)
+        """
+        Return road segments as a GeoJSON FeatureCollection.
+
+        Supports:
+        - Pagination
+        - Case-insensitive name filtering
+        - Minimum and maximum speed limits
+        - Spatial bounding-box filtering
+        """
+
+        # -----------------------------------------
+        # Validate query parameters
+        # -----------------------------------------
+
         try:
             parsed_limit = parse_nonnegative_int(limit)
+
             parsed_offset = parse_nonnegative_int(offset)
-            parsed_min = parse_nonnegative_number(min_speed_kph) if min_speed_kph is not None else None
-            parsed_max = parse_nonnegative_number(max_speed_kph) if max_speed_kph is not None else None
+
+            parsed_min = (
+                parse_nonnegative_number(min_speed_kph)
+                if min_speed_kph is not None
+                else None
+            )
+
+            parsed_max = (
+                parse_nonnegative_number(max_speed_kph)
+                if max_speed_kph is not None
+                else None
+            )
+
+            parsed_bbox = (
+                parse_bbox(bbox)
+                if bbox is not None
+                else None
+            )
+
         except InvalidQueryValue as error:
-            raise HTTPException(status_code=422, detail=GEOJSON_PARAM_ERROR) from error
-        if parsed_min is not None and parsed_max is not None and parsed_min > parsed_max:
-            raise HTTPException(status_code=400, detail=GEOJSON_FILTER_ERROR)
+            raise HTTPException(
+                status_code=422,
+                detail=GEOJSON_PARAM_ERROR,
+            ) from error
+
+        # Reject inconsistent speed-limit ranges.
+        if (
+            parsed_min is not None
+            and parsed_max is not None
+            and parsed_min > parsed_max
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=GEOJSON_FILTER_ERROR,
+            )
+
+        # -----------------------------------------
+        # Retrieve filtered GeoJSON data
+        # -----------------------------------------
 
         try:
             rows, count = self.dao.get_road_segments_geojson(
-                parsed_limit, parsed_offset, name, parsed_min, parsed_max,
+                parsed_limit,
+                parsed_offset,
+                name,
+                parsed_min,
+                parsed_max,
+                parsed_bbox,
             )
+
         except Exception as error:
             raise self._internal_error(
-                "Road segment GeoJSON export failed", GEOJSON_SERVER_ERROR
+                "Road segment GeoJSON export failed",
+                GEOJSON_SERVER_ERROR,
             ) from error
 
-        features = [
-            {"type": "Feature", "geometry": row.pop("geom"), "properties": row}
-            for row in rows
-        ]
+        # -----------------------------------------
+        # Build GeoJSON FeatureCollection
+        # -----------------------------------------
+
+        features = []
+
+        for row in rows:
+            properties = dict(row)
+            geometry = properties.pop("geom")
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": properties,
+                }
+            )
+
         return {
             "type": "FeatureCollection",
             "count": count,

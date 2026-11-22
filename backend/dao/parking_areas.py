@@ -95,6 +95,27 @@ class ParkingAreaDeleteResponse(BaseModel):
     message: str
     parking_area_id: int
 
+class ParkingAreaGeoJSONProperties(ParkingAreaListItem):
+    """Properties exposed for each parking-area GeoJSON feature."""
+
+
+class ParkingAreaFeature(BaseModel):
+    """GeoJSON Feature containing a parking-area polygon."""
+
+    type: Literal["Feature"] = "Feature"
+    geometry: PolygonGeometry
+    properties: ParkingAreaGeoJSONProperties
+
+
+class ParkingAreaFeatureCollection(BaseModel):
+    """Paginated GeoJSON FeatureCollection."""
+
+    type: Literal["FeatureCollection"] = "FeatureCollection"
+    count: int
+    limit: int
+    offset: int
+    features: list[ParkingAreaFeature]
+
 
 class ParkingAreaDAO:
     """SQL-only data access using the existing psycopg2 connection pool."""
@@ -154,6 +175,82 @@ class ParkingAreaDAO:
                 cursor.execute(count_query, params)
                 total = cursor.fetchone()["total"]
                 return rows, total
+
+    def get_parking_areas_geojson(
+        self,
+        limit: int,
+        offset: int,
+        name: str | None = None,
+        bbox: tuple[float, float, float, float] | None = None,
+    ):
+        """
+        Return paginated parking-area geometries.
+
+        Supports name and bbox filters.
+        """
+
+        clauses = []
+        params = []
+
+        if name is not None:
+            clauses.append("name ILIKE %s")
+            params.append(f"%{name}%")
+
+        if bbox is not None:
+            clauses.append(
+                "ST_Intersects("
+                "geom, ST_MakeEnvelope(%s, %s, %s, %s, 4326))"
+            )
+            params.extend(bbox)
+
+        where_sql = (
+            " WHERE " + " AND ".join(clauses)
+            if clauses
+            else ""
+        )
+
+        query = f"""
+            SELECT
+                parking_area_id,
+                name,
+                capacity,
+                created_at,
+                ST_AsGeoJSON(geom)::json AS geom
+            FROM public.parking_area
+            {where_sql}
+            ORDER BY parking_area_id
+            LIMIT %s OFFSET %s
+        """
+
+        count_query = f"""
+            SELECT COUNT(*) AS total
+            FROM public.parking_area
+            {where_sql}
+        """
+
+        with get_db_connection() as conn:
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cursor:
+
+                cursor.execute(
+                    query,
+                    params + [limit, offset],
+                )
+
+                rows = [
+                    dict(row)
+                    for row in cursor.fetchall()
+                ]
+
+                cursor.execute(
+                    count_query,
+                    params,
+                )
+
+                total = cursor.fetchone()["total"]
+
+        return rows, total
 
     def update_parking_area(self, parking_area_id: int, changes: dict):
         expressions = []
