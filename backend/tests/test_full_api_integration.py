@@ -189,6 +189,11 @@ EXPECTED.update({
         "200": "Parking area collection returned.",
         "400": "Invalid query parameter values.",
     },
+    ("/api/v1/parking-areas/geojson", "get"): {
+        "200": "GeoJSON FeatureCollection returned successfully.",
+        "400": "Invalid query parameter values.",
+        "500": "Internal server error.",
+    },
     ("/api/v1/parking-areas/{parking_area_id}", "get"): {
         "200": "Parking area returned.",
         "404": "parking_area_id does not exist.",
@@ -242,6 +247,7 @@ PAGINATION_DEFAULTS = {
     ("/api/v1/vehicles", "get"): {"limit": 20, "offset": 0},
     ("/api/v1/vehicle-assignments", "get"): {"limit": 20, "offset": 0},
     ("/api/v1/parking-areas", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/parking-areas/geojson", "get"): {"limit": 100, "offset": 0},
     ("/api/v1/road-segments", "get"): {"limit": 20, "offset": 0},
     ("/api/v1/road-segments/geojson", "get"): {
         "limit": 15000,
@@ -570,7 +576,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 106)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 109)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -603,7 +609,7 @@ class ProfessorGrader(unittest.TestCase):
                     self.assertNotIn("maximum", schema)
                     pagination_parameter_count += 1
 
-        self.assertEqual(pagination_parameter_count, 20)
+        self.assertEqual(pagination_parameter_count, 22)
 
     def test_02_all_list_shapes_and_zero_limit(self):
         for url in (D, V, A, P, PA, T, RS):
@@ -3129,11 +3135,14 @@ class ProfessorGrader(unittest.TestCase):
     def test_58_road_geojson_invalid_filter_matrix(self):
         invalid_filters = [
             {
-                "params": {
-                    "bbox": "-65.6,18.3,-65.4,18.5",
-                },
-                "status": 400,
-                "detail": "Invalid or inconsistent filter values.",
+                "params": {"bbox": "invalid,bbox"},
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
+            },
+            {
+                "params": {"bbox": "-65.4,18.3,-65.6,18.5"},
+                "status": 422,
+                "detail": "A query parameter fails type or range validation.",
             },
             {
                 "params": {
@@ -3757,6 +3766,266 @@ finally:
 
         self.call("POST", AUTH + "/register", 400, raw="{broken")
         self.call("POST", AUTH + "/login", 400, raw="{broken")
+
+    # -------------------------------------------------------
+    # Phase III - Issue #42: Parking and Road GeoJSON extensions
+    # -------------------------------------------------------
+
+    def test_76_parking_geojson_contract_and_polygon_properties(self):
+        token = "GeoParking" + uuid.uuid4().hex[:12]
+        created = self.new_parking(name=token, capacity=37)
+        url = PA + "/geojson"
+
+        data = self.call("GET", url, 200, params={"name": token})
+        self.assertEqual(
+            set(data), {"type", "count", "limit", "offset", "features"}
+        )
+        self.assertEqual(data["type"], "FeatureCollection")
+        self.assertEqual((data["count"], data["limit"], data["offset"]), (1, 100, 0))
+        self.assertEqual(len(data["features"]), 1)
+        feature = data["features"][0]
+        self.assertEqual(set(feature), {"type", "geometry", "properties"})
+        self.assertEqual(feature["type"], "Feature")
+        self.assert_polygon_equal(feature["geometry"], created["geom"])
+        self.assertEqual(
+            feature["properties"],
+            {key: created[key] for key in (
+                "parking_area_id", "name", "capacity", "created_at"
+            )},
+        )
+        self.assertNotIn("geom", feature["properties"])
+
+        # Existing Phase II list response must remain geometry-free.
+        old_list = self.call("GET", PA, 200, params={"name": token})
+        self.assertEqual(old_list["count"], 1)
+        self.assertNotIn("geom", old_list["items"][0])
+        self.assertEqual(
+            self.call("GET", f"{PA}/{created['parking_area_id']}", 200),
+            created,
+        )
+
+    def test_77_parking_geojson_pagination_and_empty_pages(self):
+        token = "GeoPage" + uuid.uuid4().hex[:12]
+        created = [self.new_parking(name=f"{token} {i}") for i in range(3)]
+        expected_ids = sorted(item["parking_area_id"] for item in created)
+        url = PA + "/geojson"
+        pages = [
+            self.call("GET", url, 200, params={
+                "name": token, "limit": 1, "offset": i,
+            })
+            for i in range(4)
+        ]
+        self.assertEqual([page["count"] for page in pages], [3] * 4)
+        self.assertEqual(
+            [page["features"][0]["properties"]["parking_area_id"] for page in pages[:3]],
+            expected_ids,
+        )
+        self.assertEqual(pages[3]["features"], [])
+        zero = self.call("GET", url, 200, params={"name": token, "limit": 0})
+        self.assertEqual(zero["features"], [])
+        self.assertEqual(zero["count"], 3)
+        self.assertEqual(zero["limit"], 0)
+
+    def test_78_parking_geojson_bbox_intersection_and_combined_name(self):
+        token = "GeoSpatialPark" + uuid.uuid4().hex[:10]
+        inside = self.new_parking(
+            name=token + " Inside", geom=self.parking_polygon(100, 20)
+        )
+        outside = self.new_parking(
+            name=token + " Outside", geom=self.parking_polygon(102, 22)
+        )
+        self.new_parking(name="Unrelated " + uuid.uuid4().hex,
+                         geom=self.parking_polygon(100.002, 20.002))
+        url = PA + "/geojson"
+        touching = self.call("GET", url, 200, params={
+            "name": token.lower(),
+            "bbox": "100.01,20.001,100.02,20.009",
+        })
+        self.assertEqual(touching["count"], 1)
+        self.assertEqual(
+            [f["properties"]["parking_area_id"] for f in touching["features"]],
+            [inside["parking_area_id"]],
+        )
+        self.assertNotEqual(inside["parking_area_id"], outside["parking_area_id"])
+        no_match = self.call("GET", url, 200, params={
+            "name": token, "bbox": "100.011,20.001,100.02,20.009"
+        })
+        self.assertEqual(no_match["count"], 0)
+        self.assertEqual(no_match["features"], [])
+
+    def test_79_parking_geojson_null_capacity_and_polygon_hole(self):
+        token = "GeoHole" + uuid.uuid4().hex[:12]
+        polygon = self.parking_polygon(100, 20, 0.04)
+        hole = [
+            [100.01, 20.01], [100.01, 20.02], [100.02, 20.02],
+            [100.02, 20.01], [100.01, 20.01],
+        ]
+        polygon["coordinates"].append(hole)
+        created = self.new_parking(name=token, capacity=None, geom=polygon)
+        result = self.call("GET", PA + "/geojson", 200, params={"name": token})
+        self.assertEqual(result["count"], 1)
+        feature = result["features"][0]
+        self.assertIsNone(feature["properties"]["capacity"])
+        self.assert_polygon_equal(feature["geometry"], created["geom"])
+        self.assertEqual(len(feature["geometry"]["coordinates"]), 2)
+
+    def test_80_parking_geojson_invalid_parameters(self):
+        cases = [
+            {"limit": -1}, {"offset": -1}, {"limit": "x"},
+            {"offset": "1.5"}, {"bbox": ""}, {"bbox": "bad"},
+            {"bbox": "nan,20,101,21"},
+            {"bbox": "100,20,100,21"},
+            {"bbox": "101,20,100,21"},
+            {"bbox": "100,-91,101,-90"},
+        ]
+        for params in cases:
+            with self.subTest(params=params):
+                self.call("GET", PA + "/geojson", 400, params=params,
+                          detail="Invalid query parameter values.")
+
+    def test_81_road_geojson_bbox_includes_crossing_lines(self):
+        token = "GeoCrossing" + uuid.uuid4().hex[:12]
+        crossing = self.new_road_segment(
+            name=token + " Crosses",
+            geom=self.road_line((100, 20), (100.04, 20.04)),
+        )
+        outside = self.new_road_segment(
+            name=token + " Outside",
+            geom=self.road_line((102, 22), (102.04, 22.04)),
+        )
+        bbox = "100.015,20.015,100.025,20.025"
+        result = self.call("GET", RS + "/geojson", 200,
+                           params={"name": token, "bbox": bbox})
+        self.assertEqual(result["count"], 1)
+        feature = result["features"][0]
+        self.assertEqual(feature["geometry"], crossing["geom"])
+        self.assertEqual(feature["geometry"]["type"], "LineString")
+        self.assertEqual(feature["properties"]["road_id"], crossing["road_id"])
+        self.assertNotEqual(feature["properties"]["road_id"], outside["road_id"])
+        self.assertIn("speed_limit_kph", feature["properties"])
+        self.assertIn("name", feature["properties"])
+
+        none = self.call("GET", RS + "/geojson", 200, params={
+            "name": token, "bbox": "101,20,101.1,20.1"
+        })
+        self.assertEqual(none["count"], 0)
+        self.assertEqual(none["features"], [])
+
+    def test_82_road_geojson_all_filters_and_pagination(self):
+        token = "GeoAllFilters" + uuid.uuid4().hex[:10]
+        slow = self.new_road_segment(
+            name=token + " Slow", speed_limit_kph=30,
+            geom=self.road_line((100, 20), (100.01, 20.01)),
+        )
+        fast = self.new_road_segment(
+            name=token + " Fast", speed_limit_kph=70,
+            geom=self.road_line((100, 20), (100.01, 20.01)),
+        )
+        far = self.new_road_segment(
+            name=token + " Far", speed_limit_kph=70,
+            geom=self.road_line((102, 22), (102.01, 22.01)),
+        )
+        url = RS + "/geojson"
+        result = self.call("GET", url, 200, params={
+            "name": token.lower(), "min_speed_kph": 40,
+            "max_speed_kph": 80, "bbox": "99.99,19.99,100.02,20.02",
+            "limit": 1, "offset": 0,
+        })
+        self.assertEqual(result["count"], 1)
+        self.assertEqual((result["limit"], result["offset"]), (1, 0))
+        self.assertEqual(
+            [f["properties"]["road_id"] for f in result["features"]],
+            [fast["road_id"]],
+        )
+        self.assertNotIn(slow["road_id"], [f["properties"]["road_id"] for f in result["features"]])
+        self.assertNotIn(far["road_id"], [f["properties"]["road_id"] for f in result["features"]])
+        zero = self.call("GET", url, 200, params={
+            "name": token, "bbox": "99.99,19.99,100.02,20.02",
+            "limit": 0,
+        })
+        self.assertEqual(zero["count"], 2)
+        self.assertEqual(zero["features"], [])
+        beyond = self.call("GET", url, 200, params={
+            "name": token, "bbox": "99.99,19.99,100.02,20.02",
+            "limit": 2, "offset": 2,
+        })
+        self.assertEqual(beyond["count"], 2)
+        self.assertEqual(beyond["features"], [])
+
+    @staticmethod
+    def issue42_postgis_matching_ids(resource, bbox):
+        """Independently query PostGIS via the isolated test backend container.
+
+        This helper is read-only and explicitly refuses non-test environments.
+        """
+        script = r"""
+import json
+import os
+import sys
+from backend.config.dbconfig import (
+    initialize_connection_pool, get_db_connection, close_connection_pool,
+)
+args = json.load(sys.stdin)
+if os.environ.get("APP_ENV") != "test" or os.environ.get("DB_NAME") != "cartracking_test":
+    raise RuntimeError("Refusing spatial verification outside test database")
+resource = args["resource"]
+tables = {
+    "parking": ("public.parking_area", "parking_area_id"),
+    "road": ("public.road_segment", "road_id"),
+}
+if resource not in tables:
+    raise RuntimeError("Unsupported table")
+table, key = tables[resource]
+bbox = args["bbox"]
+if len(bbox) != 4 or not all(isinstance(x, (float, int)) for x in bbox):
+    raise RuntimeError("Invalid bbox")
+initialize_connection_pool()
+try:
+    with get_db_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT current_database()")
+            if cur.fetchone()[0] != "cartracking_test":
+                raise RuntimeError("Unexpected database")
+            query = (
+                f"SELECT {key} FROM {table} WHERE ST_Intersects("
+                "geom, ST_MakeEnvelope(%s,%s,%s,%s,4326)) "
+                f"ORDER BY {key}"
+            )
+            cur.execute(query, bbox)
+            print(json.dumps([row[0] for row in cur.fetchall()]))
+finally:
+    close_connection_pool()
+"""
+        result = subprocess.run(
+            ["docker", "compose", "--profile", "test", "exec", "-T",
+             "backend-test", "python", "-c", script],
+            input=json.dumps({"resource": resource, "bbox": bbox}),
+            capture_output=True, text=True, timeout=35,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "Issue #42 PostGIS verification failed: " + result.stderr[-1200:]
+            )
+        return json.loads(result.stdout.strip())
+
+    def test_83_postgis_independent_bbox_counts_and_feature_ids(self):
+        bbox = [-67.20, 18.15, -67.10, 18.25]
+        bbox_text = ",".join(map(str, bbox))
+        for resource, url, id_field in (
+            ("parking", PA + "/geojson", "parking_area_id"),
+            ("road", RS + "/geojson", "road_id"),
+        ):
+            with self.subTest(resource=resource):
+                expected_ids = self.issue42_postgis_matching_ids(resource, bbox)
+                page = self.call("GET", url, 200, params={
+                    "bbox": bbox_text, "limit": 10, "offset": 0,
+                })
+                self.assertEqual(page["type"], "FeatureCollection")
+                self.assertEqual(page["count"], len(expected_ids))
+                self.assertEqual(
+                    [feature["properties"][id_field] for feature in page["features"]],
+                    expected_ids[:10],
+                )
 
     # -------------------------------------------------------
     # Final Road Segment database preservation

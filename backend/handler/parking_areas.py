@@ -170,6 +170,65 @@ class ParkingAreaHandler:
             logger.exception("Parking area listing failed")
             raise HTTPException(status_code=500, detail="Internal server error") from exc
 
+    def get_parking_areas_geojson(
+        self,
+        limit: int,
+        offset: int,
+        name: str | None = None,
+        bbox: str | None = None,
+    ):
+        """
+        Return parking areas as a GeoJSON FeatureCollection.
+
+        Bounding-box format:
+        min_lon,min_lat,max_lon,max_lat
+        """
+
+        # Existing Phase II bbox validation.
+        parsed_bbox = self.parse_bbox(bbox)
+
+        try:
+            rows, total = self.dao.get_parking_areas_geojson(
+                limit=limit,
+                offset=offset,
+                name=name,
+                bbox=parsed_bbox,
+            )
+
+            features = []
+
+            for row in rows:
+                # Do not modify the DAO result's original dictionary.
+                properties = dict(row)
+
+                # GeoJSON requires geometry outside properties.
+                geometry = properties.pop("geom")
+
+                features.append(
+                    {
+                        "type": "Feature",
+                        "geometry": geometry,
+                        "properties": properties,
+                    }
+                )
+
+            return {
+                "type": "FeatureCollection",
+                "count": total,
+                "limit": limit,
+                "offset": offset,
+                "features": features,
+            }
+
+        except Exception as exc:
+            logger.exception(
+                "Parking area GeoJSON export failed"
+            )
+
+            raise HTTPException(
+                status_code=500,
+                detail="Internal server error",
+            ) from exc
     
     def update_parking_area(self, parking_area_id, changes):
         if not changes:

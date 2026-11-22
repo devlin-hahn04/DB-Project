@@ -63,8 +63,12 @@ from backend.dao.location_pings import (
     LocationPingListResponse, LocationPingDeleteResponse, VehiclePingListResponse,
 )
 from backend.dao.parking_areas import (
-    ParkingAreaCreate, ParkingAreaUpdate, ParkingAreaResponse,
-    ParkingAreaListResponse, ParkingAreaDeleteResponse,
+    ParkingAreaCreate,
+    ParkingAreaUpdate,
+    ParkingAreaResponse,
+    ParkingAreaListResponse,
+    ParkingAreaDeleteResponse,
+    ParkingAreaFeatureCollection,
 )
 from backend.dao.road_segments import (
     RoadSegmentCreate,
@@ -720,6 +724,69 @@ def get_parking_areas(
     parsed_bbox = parking_area_handler.parse_bbox(bbox)
     return parking_area_handler.get_parking_areas(parsed_limit, parsed_offset, name, parsed_bbox)
 
+# ---------------------------------------------------------
+# GET /api/v1/parking-areas/geojson
+# Phase III - Issue #42
+# ---------------------------------------------------------
+
+# Registered before /{parking_area_id} so "geojson"
+# is not interpreted as a parking_area_id.
+
+@app.get(
+    "/api/v1/parking-areas/geojson",
+    response_model=ParkingAreaFeatureCollection,
+    response_description=(
+        "GeoJSON FeatureCollection returned successfully."
+    ),
+    responses={
+        400: {
+            "description": "Invalid query parameter values."
+        },
+        500: {
+            "description": "Internal server error."
+        },
+    },
+    tags=["Parking Areas"],
+)
+def get_parking_areas_geojson(
+    limit: str = pagination_query(100),
+    offset: str = pagination_query(0),
+    name: str | None = None,
+    bbox: str | None = Query(
+        default=None,
+        description="minLon,minLat,maxLon,maxLat",
+    ),
+):
+    """
+    Return parking-area polygons as a GeoJSON FeatureCollection.
+
+    Supports pagination, name filtering, and bbox filtering.
+    """
+
+    # Preserve existing Parking Areas HTTP 400 validation.
+    try:
+        parsed_limit = parse_nonnegative_integer(
+            limit,
+            "limit",
+        )
+
+        parsed_offset = parse_nonnegative_integer(
+            offset,
+            "offset",
+        )
+
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid query parameter values.",
+        ) from exc
+
+    return parking_area_handler.get_parking_areas_geojson(
+        limit=parsed_limit,
+        offset=parsed_offset,
+        name=name,
+        bbox=bbox,
+    )
 
 @app.get(
     "/api/v1/parking-areas/{parking_area_id}",
@@ -811,16 +878,27 @@ def get_road_segments(
     )
 
 
-# Registered before /{road_id} so "geojson" is not read as a road_id.
 @app.get(
     "/api/v1/road-segments/geojson",
     response_model=RoadSegmentFeatureCollection,
     response_class=GeoJSONResponse,
-    response_description="GeoJSON FeatureCollection returned successfully.",
+    response_description=(
+        "GeoJSON FeatureCollection returned successfully."
+    ),
     responses={
-        400: {"description": "Invalid or inconsistent filter values."},
-        422: {"description": "A query parameter fails type or range validation."},
-        500: {"description": "The service could not complete the request."},
+        400: {
+            "description": "Invalid or inconsistent filter values."
+        },
+        422: {
+            "description": (
+                "A query parameter fails type or range validation."
+            )
+        },
+        500: {
+            "description": (
+                "The service could not complete the request."
+            )
+        },
     },
     tags=["Road Segments"],
 )
@@ -830,10 +908,28 @@ def get_road_segments_geojson(
     name: str | None = None,
     min_speed_kph: str | None = None,
     max_speed_kph: str | None = None,
-    bbox: str | None = Query(default=None, include_in_schema=False),
+    bbox: str | None = Query(
+        default=None,
+        description="minLon,minLat,maxLon,maxLat",
+    ),
 ):
+    """
+    Return road segments as a GeoJSON FeatureCollection.
+
+    Supports:
+    - Pagination
+    - Name filtering
+    - Minimum and maximum speed-limit filtering
+    - Bounding-box spatial filtering
+    """
+
     return road_segment_handler.get_road_segments_geojson(
-        limit, offset, name, min_speed_kph, max_speed_kph, bbox,
+        limit=limit,
+        offset=offset,
+        name=name,
+        min_speed_kph=min_speed_kph,
+        max_speed_kph=max_speed_kph,
+        bbox=bbox,
     )
 
 

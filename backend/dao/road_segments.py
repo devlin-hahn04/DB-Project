@@ -268,11 +268,29 @@ class RoadSegmentDAO:
         )
 
     def get_road_segments_geojson(
-        self, limit, offset, name=None, min_speed_kph=None, max_speed_kph=None,
+        self,
+        limit,
+        offset,
+        name=None,
+        min_speed_kph=None,
+        max_speed_kph=None,
+        bbox=None,
     ):
+        """
+        Retrieve road segments for GeoJSON export.
+
+        Supports pagination, name filtering, speed-limit
+        filtering, and spatial bounding-box filtering.
+        """
+
         return self._get_page(
-            self.CREATE_GEOJSON_COLUMNS, limit, offset, name=name,
-            min_speed_kph=min_speed_kph, max_speed_kph=max_speed_kph,
+            self.CREATE_GEOJSON_COLUMNS,
+            limit,
+            offset,
+            name=name,
+            min_speed_kph=min_speed_kph,
+            max_speed_kph=max_speed_kph,
+            bbox=bbox,
         )
 
     def get_road_segment_by_id(self, road_id) -> dict | None:
