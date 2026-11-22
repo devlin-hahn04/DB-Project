@@ -8,3 +8,8 @@ python-dotenv
 fastapi
 uvicorn[standard]
 psycopg2-binary
+
+# Phase III - Authentication
+pwdlib[argon2]>=0.2,<1
+PyJWT>=2.9,<3
+email-validator>=2,<3

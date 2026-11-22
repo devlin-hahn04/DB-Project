@@ -15,5 +15,10 @@ validate.py
 envs/.env.local
 envs/.env.render
 
+
 # Local API testing scripts
-/backend/tests/
+# Ignore everything inside backend/tests/
+backend/tests/*
+
+# Exception: Track the full integration test suite
+!backend/tests/test_full_api_integration.py

@@ -1,6 +1,33 @@
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Query, Request, Response
+
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    Query,
+    Request,
+    Response,
+    Depends
+)
+
+
+from fastapi.security import (
+    HTTPBearer,
+    HTTPAuthorizationCredentials
+)
+
+from backend.handler.auth import AuthHandler
+
+from backend.security.schemas import (
+    RegisterRequest,
+    LoginRequest,
+    UserResponse,
+    TokenResponse
+)
+
+from backend.security.tokens import validate_settings
+
+
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.openapi.utils import get_openapi
@@ -71,9 +98,14 @@ class DatabaseHealthResponse(BaseModel):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    validate_settings()
+
     initialize_connection_pool()
+
     yield
+
     close_connection_pool()
+
 
 
 # ---------------------------------------------------------
@@ -110,6 +142,78 @@ def database_health():
     handler = HealthHandler()
     return handler.get_database_status()
 
+
+# =========================================================
+# Phase III - Authentication Endpoints
+# =========================================================
+
+auth_handler = AuthHandler()
+
+auth_bearer = HTTPBearer(auto_error=False)
+
+
+def require_auth_token(
+    credentials: HTTPAuthorizationCredentials | None = Depends(
+        auth_bearer
+    )
+) -> str:
+    """Require a Bearer token in the Authorization header."""
+
+    if (
+        credentials is None
+        or credentials.scheme.lower() != "bearer"
+    ):
+        raise HTTPException(
+            status_code=401,
+            detail="Not authenticated.",
+            headers={
+                "WWW-Authenticate": "Bearer"
+            }
+        )
+
+    return credentials.credentials
+
+
+@app.post(
+    "/api/v1/auth/register",
+    status_code=201,
+    response_model=UserResponse,
+    tags=["Authentication"]
+)
+def auth_register(data: RegisterRequest):
+    """Register a new application user."""
+
+    return auth_handler.register(
+        data.email,
+        data.password
+    )
+
+
+@app.post(
+    "/api/v1/auth/login",
+    response_model=TokenResponse,
+    tags=["Authentication"]
+)
+def auth_login(data: LoginRequest):
+    """Authenticate credentials and issue an access token."""
+
+    return auth_handler.login(
+        data.email,
+        data.password
+    )
+
+
+@app.get(
+    "/api/v1/auth/me",
+    response_model=UserResponse,
+    tags=["Authentication"]
+)
+def auth_me(
+    token: str = Depends(require_auth_token)
+):
+    """Return the authenticated user's account information."""
+
+    return auth_handler.current_user(token)
 
 
 # ---------------------------------------------------------
