@@ -34,3 +34,15 @@ The deployed database is hosted on Render and contains the project tables and im
 | **Database port** | `5432` |
 | **Database password** | `dvAXpDOZkDMOwD7o1K4NRY54C43jNWrP` |
 
+## Render REST API
+
+The Phase 2 FastAPI backend is hosted on Render and connected to the Render database above.
+
+| Resource | URL |
+|---|---|
+| **API base URL** | `https://car-tracking-api-82ra.onrender.com/api/v1` |
+| **Swagger documentation** | [https://car-tracking-api-82ra.onrender.com/docs](https://car-tracking-api-82ra.onrender.com/docs) |
+| **Database health check** | [https://car-tracking-api-82ra.onrender.com/api/v1/health/database](https://car-tracking-api-82ra.onrender.com/api/v1/health/database) |
+
+The service runs on Render's free instance, so the first request after a period of inactivity can take up to a minute while it starts.
+
