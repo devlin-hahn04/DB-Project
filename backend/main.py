@@ -59,8 +59,13 @@ from backend.dao.trips import (
     VehicleTripListResponse, TripDeleteResponse,
 )
 from backend.dao.location_pings import (
-    LocationPingCreate, LocationPingUpdate, LocationPingResponse,
-    LocationPingListResponse, LocationPingDeleteResponse, VehiclePingListResponse,
+    LocationPingCreate,
+    LocationPingUpdate,
+    LocationPingResponse,
+    LocationPingListResponse,
+    LocationPingDeleteResponse,
+    VehiclePingListResponse,
+    LatestVehiclePingFeatureCollection,
 )
 from backend.dao.parking_areas import (
     ParkingAreaCreate,
@@ -1019,6 +1024,47 @@ def get_location_pings(
 ):
     return ping_handler.get_all_pings(limit, offset, vehicle_id, from_ts, to_ts, bbox)
 
+# ---------------------------------------------------------
+# GET /api/v1/location-pings/latest
+# Phase III - Issue #43
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/v1/location-pings/latest",
+    response_model=LatestVehiclePingFeatureCollection,
+    response_description=(
+        "Fleet-wide latest vehicle locations returned successfully."
+    ),
+    responses={
+        400: {
+            "description": "Invalid query parameter values."
+        },
+        500: {
+            "description": "Internal server error."
+        },
+    },
+    tags=["Location Pings"],
+)
+def get_latest_vehicle_pings(
+    limit: str = pagination_query(100),
+    offset: str = pagination_query(0),
+    bbox: str | None = Query(
+        default=None,
+        description="minLon,minLat,maxLon,maxLat",
+    ),
+):
+    """
+    Return one most recent GPS ping per vehicle.
+
+    Bounding-box filtering is performed after selecting
+    each vehicle's latest ping.
+    """
+
+    return ping_handler.get_latest_vehicle_pings(
+        limit=limit,
+        offset=offset,
+        bbox=bbox,
+    )
 
 @app.get(
     "/api/v1/location-pings/{ping_id}",

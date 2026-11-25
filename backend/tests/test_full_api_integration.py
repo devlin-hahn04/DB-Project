@@ -125,6 +125,11 @@ EXPECTED = {
         "200": "Ping collection returned.",
         "400": "Invalid query parameter values.",
     },
+    ("/api/v1/location-pings/latest", "get"): {
+        "200": "Fleet-wide latest vehicle locations returned successfully.",
+        "400": "Invalid query parameter values.",
+        "500": "Internal server error.",
+    },
     ("/api/v1/location-pings/{ping_id}", "get"): {
         "200": "Ping returned successfully.",
         "404": "ping_id does not exist.",
@@ -254,6 +259,7 @@ PAGINATION_DEFAULTS = {
         "offset": 0,
     },
     ("/api/v1/location-pings", "get"): {"limit": 20, "offset": 0},
+    ("/api/v1/location-pings/latest", "get"): {"limit": 100, "offset": 0},
     ("/api/v1/vehicles/{vehicle_id}/pings", "get"): {
         "limit": 20,
         "offset": 0,
@@ -576,7 +582,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 109)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 112)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -609,7 +615,7 @@ class ProfessorGrader(unittest.TestCase):
                     self.assertNotIn("maximum", schema)
                     pagination_parameter_count += 1
 
-        self.assertEqual(pagination_parameter_count, 22)
+        self.assertEqual(pagination_parameter_count, 24)
 
     def test_02_all_list_shapes_and_zero_limit(self):
         for url in (D, V, A, P, PA, T, RS):
@@ -4026,6 +4032,313 @@ finally:
                     [feature["properties"][id_field] for feature in page["features"]],
                     expected_ids[:10],
                 )
+
+    # -------------------------------------------------------
+    # Phase III - Issue #43: Fleet-wide latest vehicle pings
+    # -------------------------------------------------------
+
+    @staticmethod
+    def issue43_bbox():
+        """Isolated test region, away from the Puerto Rico seed records."""
+        return "129.9,-40.1,130.1,-39.9"
+
+    def issue43_new_vehicle(self):
+        """Create a vehicle with per-test cleanup, even if an assertion fails."""
+        vehicle = self.new_vehicle()
+        self.addCleanup(self.issue43_delete, f"{V}/{vehicle['vehicle_id']}")
+        return vehicle
+
+    def issue43_new_ping(self, vehicle_id, ts=START, geom=None, speed=42.8):
+        """Create a ping with per-test cleanup, preserving FK deletion order."""
+        payload = {
+            "vehicle_id": vehicle_id,
+            "ts": ts,
+            "geom": geom if geom is not None else point(130.0, -40.0),
+            "speed_kph": speed,
+            "heading_deg": 0,
+        }
+        ping = self.call("POST", P, 201, payload)
+        self.resources.append(f"{P}/{ping['ping_id']}")
+        self.addCleanup(self.issue43_delete, f"{P}/{ping['ping_id']}")
+        return ping
+
+    def issue43_delete(self, url):
+        status, payload = http("DELETE", url)
+        self.assertIn(status, (200, 404), f"Issue #43 cleanup failed: {url} {payload}")
+
+    @staticmethod
+    def issue43_feature_by_vehicle(response, vehicle_id):
+        matches = [
+            feature for feature in response["features"]
+            if feature["properties"]["vehicle_id"] == vehicle_id
+        ]
+        if len(matches) > 1:
+            raise AssertionError("Multiple latest-ping features for one vehicle")
+        return matches[0] if matches else None
+
+    def test_84_latest_ping_one_per_vehicle_and_count(self):
+        url = P + "/latest"
+        baseline = self.call("GET", url, 200)
+        before = baseline["count"]
+        first = self.issue43_new_vehicle()
+        second = self.issue43_new_vehicle()
+        self.issue43_new_ping(first["vehicle_id"], START)
+        self.issue43_new_ping(first["vehicle_id"], END)
+        self.issue43_new_ping(second["vehicle_id"], START)
+        result = self.call("GET", url, 200, params={"limit": 1000})
+        self.assertEqual(result["count"], before + 2)
+        ids = [f["properties"]["vehicle_id"] for f in result["features"]]
+        self.assertEqual(len(ids), len(set(ids)))
+        self.assertIn(first["vehicle_id"], ids)
+        self.assertIn(second["vehicle_id"], ids)
+        self.assertEqual(result["count"], len(ids))
+
+    def test_85_latest_ping_timestamp_beats_insertion_order(self):
+        vehicle = self.issue43_new_vehicle()
+        newest = self.issue43_new_ping(vehicle["vehicle_id"], END)
+        old = self.issue43_new_ping(vehicle["vehicle_id"], START)
+        response = self.call("GET", P + "/latest", 200, params={"limit": 1000})
+        selected = self.issue43_feature_by_vehicle(response, vehicle["vehicle_id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["properties"]["ping_id"], newest["ping_id"])
+        self.assertEqual(selected["properties"]["ts"], END)
+        self.assertNotEqual(selected["properties"]["ping_id"], old["ping_id"])
+
+    def test_86_latest_ping_identical_timestamp_tie_breaker(self):
+        vehicle = self.issue43_new_vehicle()
+        first = self.issue43_new_ping(vehicle["vehicle_id"], END, point(130, -40))
+        second = self.issue43_new_ping(vehicle["vehicle_id"], END, point(132, -42))
+        response = self.call("GET", P + "/latest", 200, params={"limit": 1000})
+        selected = self.issue43_feature_by_vehicle(response, vehicle["vehicle_id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["properties"]["ping_id"], max(
+            first["ping_id"], second["ping_id"]
+        ))
+        self.assertEqual(selected["geometry"], point(132, -42))
+
+    def test_87_latest_outside_bbox_older_inside_is_excluded(self):
+        vehicle = self.issue43_new_vehicle()
+        older = self.issue43_new_ping(vehicle["vehicle_id"], START, point(130, -40))
+        latest = self.issue43_new_ping(vehicle["vehicle_id"], END, point(132, -42))
+        boxed = self.call("GET", P + "/latest", 200, params={
+            "bbox": self.issue43_bbox(), "limit": 1000,
+        })
+        self.assertIsNone(self.issue43_feature_by_vehicle(boxed, vehicle["vehicle_id"]))
+        self.assertNotIn(older["ping_id"], [
+            f["properties"]["ping_id"] for f in boxed["features"]
+        ])
+        unfiltered = self.call("GET", P + "/latest", 200, params={"limit": 1000})
+        self.assertEqual(
+            self.issue43_feature_by_vehicle(unfiltered, vehicle["vehicle_id"])
+            ["properties"]["ping_id"], latest["ping_id"]
+        )
+
+    def test_88_latest_inside_bbox_older_outside_is_included(self):
+        vehicle = self.issue43_new_vehicle()
+        self.issue43_new_ping(vehicle["vehicle_id"], START, point(132, -42))
+        latest = self.issue43_new_ping(vehicle["vehicle_id"], END, point(130, -40))
+        boxed = self.call("GET", P + "/latest", 200, params={
+            "bbox": self.issue43_bbox(), "limit": 1000,
+        })
+        selected = self.issue43_feature_by_vehicle(boxed, vehicle["vehicle_id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(selected["properties"]["ping_id"], latest["ping_id"])
+        self.assertEqual(selected["geometry"], point(130, -40))
+
+    def test_89_latest_bbox_boundary_and_empty_region(self):
+        vehicle = self.issue43_new_vehicle()
+        latest = self.issue43_new_ping(vehicle["vehicle_id"], END, point(130, -40))
+        included = self.call("GET", P + "/latest", 200, params={
+            "bbox": "130,-40,130.1,-39.9", "limit": 1000,
+        })
+        self.assertEqual(
+            self.issue43_feature_by_vehicle(included, vehicle["vehicle_id"])
+            ["properties"]["ping_id"], latest["ping_id"]
+        )
+        excluded = self.call("GET", P + "/latest", 200, params={
+            "bbox": "130.00001,-40,130.1,-39.9", "limit": 1000,
+        })
+        self.assertIsNone(self.issue43_feature_by_vehicle(excluded, vehicle["vehicle_id"]))
+        empty = self.call("GET", P + "/latest", 200, params={
+            "bbox": "-170,-80,-169,-79", "limit": 5,
+        })
+        self.assertEqual(empty["count"], 0)
+        self.assertEqual(empty["features"], [])
+
+    def test_90_latest_geojson_contract_required_fields_nullable_speed(self):
+        vehicle = self.issue43_new_vehicle()
+        ping = self.issue43_new_ping(vehicle["vehicle_id"], END, point(130, -40), None)
+        result = self.call("GET", P + "/latest", 200, params={
+            "bbox": self.issue43_bbox(),
+        })
+        self.assertEqual(set(result), {"type", "count", "limit", "offset", "features"})
+        self.assertEqual(result["type"], "FeatureCollection")
+        self.assertEqual((result["limit"], result["offset"]), (100, 0))
+        selected = self.issue43_feature_by_vehicle(result, vehicle["vehicle_id"])
+        self.assertIsNotNone(selected)
+        self.assertEqual(set(selected), {"type", "geometry", "properties"})
+        self.assertEqual(selected["type"], "Feature")
+        self.assertEqual(selected["geometry"], point(130, -40))
+        props = selected["properties"]
+        self.assertEqual(set(props), {
+            "vehicle_id", "plate_number", "ping_id", "ts", "speed_kph",
+        })
+        self.assertEqual(props["vehicle_id"], vehicle["vehicle_id"])
+        self.assertEqual(props["plate_number"], vehicle["plate_number"])
+        self.assertEqual(props["ping_id"], ping["ping_id"])
+        self.assertEqual(props["ts"], END)
+        self.assertIsNone(props["speed_kph"])
+
+    def test_91_latest_pagination_order_count_and_zero_limit(self):
+        first = self.issue43_new_vehicle()
+        second = self.issue43_new_vehicle()
+        self.issue43_new_ping(first["vehicle_id"], END)
+        self.issue43_new_ping(second["vehicle_id"], END)
+        url = P + "/latest"
+        entire = self.call("GET", url, 200, params={"limit": 1000})
+        ids = [f["properties"]["vehicle_id"] for f in entire["features"]]
+        self.assertEqual(ids, sorted(ids))
+        self.assertEqual(entire["count"], len(ids))
+        for offset in (0, 1, len(ids) - 1):
+            with self.subTest(offset=offset):
+                page = self.call("GET", url, 200, params={"limit": 1, "offset": offset})
+                self.assertEqual(page["count"], len(ids))
+                self.assertEqual(
+                    [f["properties"]["vehicle_id"] for f in page["features"]],
+                    ids[offset:offset + 1],
+                )
+        zero = self.call("GET", url, 200, params={"limit": 0})
+        self.assertEqual(zero["count"], len(ids))
+        self.assertEqual(zero["features"], [])
+        beyond = self.call("GET", url, 200, params={
+            "limit": 5, "offset": len(ids) + 5,
+        })
+        self.assertEqual(beyond["count"], len(ids))
+        self.assertEqual(beyond["features"], [])
+
+    def test_92_latest_invalid_query_parameter_matrix(self):
+        cases = (
+            {"limit": -1}, {"offset": -1},
+            {"limit": "abc"}, {"offset": "2.5"},
+            {"limit": "-0"}, {"limit": "1e2"},
+            {"bbox": ""}, {"bbox": "130,-40,131"},
+            {"bbox": "x,-40,131,-39"},
+            {"bbox": "nan,-40,131,-39"},
+            {"bbox": "130,-40,inf,-39"},
+            {"bbox": "131,-40,130,-39"},
+            {"bbox": "130,-39,131,-40"},
+            {"bbox": "130,-40,130,-39"},
+            {"bbox": "180.1,-40,181,-39"},
+            {"bbox": "130,-91,131,-90"},
+        )
+        for params in cases:
+            with self.subTest(params=params):
+                self.call("GET", P + "/latest", 400, params=params,
+                          detail="Invalid query parameter values.")
+
+    @staticmethod
+    def issue43_postgis_latest_ids(bbox=None):
+        """Read-only independent SQL verification against isolated PostGIS."""
+        script = r'''
+import json
+import os
+import sys
+from backend.config.dbconfig import (
+    initialize_connection_pool, get_db_connection, close_connection_pool,
+)
+bbox = json.load(sys.stdin)
+if os.environ.get("APP_ENV") != "test" or os.environ.get("DB_NAME") != "cartracking_test":
+    raise RuntimeError("Refusing non-test database")
+initialize_connection_pool()
+try:
+    with get_db_connection() as conn:
+        with conn.cursor() as cursor:
+            cursor.execute("SELECT current_database()")
+            if cursor.fetchone()[0] != "cartracking_test":
+                raise RuntimeError("Unexpected database")
+            query = """
+                WITH latest AS (
+                    SELECT DISTINCT ON (lp.vehicle_id)
+                        lp.vehicle_id, lp.ping_id, lp.geom
+                    FROM public.location_ping lp
+                    ORDER BY lp.vehicle_id, lp.ts DESC, lp.ping_id DESC
+                )
+                SELECT latest.vehicle_id, latest.ping_id
+                FROM latest JOIN public.vehicle v USING (vehicle_id)
+            """
+            args = []
+            if bbox is not None:
+                query += " WHERE ST_Intersects(latest.geom, ST_MakeEnvelope(%s,%s,%s,%s,4326))"
+                args.extend(bbox)
+            query += " ORDER BY latest.vehicle_id"
+            cursor.execute(query, args)
+            print(json.dumps(cursor.fetchall()))
+finally:
+    close_connection_pool()
+'''
+        result = subprocess.run(
+            ["docker", "compose", "--profile", "test", "exec", "-T",
+             "backend-test", "python", "-c", script],
+            input=json.dumps(bbox), capture_output=True, text=True, timeout=40,
+        )
+        if result.returncode != 0:
+            raise RuntimeError("Independent latest-ping SQL verification failed: "
+                               + result.stderr[-1600:])
+        return json.loads(result.stdout.strip())
+
+    def test_93_latest_independent_postgis_selection_and_bbox(self):
+        vehicle = self.issue43_new_vehicle()
+        older = self.issue43_new_ping(vehicle["vehicle_id"], START, point(130, -40))
+        newest = self.issue43_new_ping(vehicle["vehicle_id"], END, point(132, -42))
+        for bbox_text, bbox_array in (
+            (None, None),
+            (self.issue43_bbox(), [129.9, -40.1, 130.1, -39.9]),
+        ):
+            with self.subTest(bbox=bbox_text):
+                expected = self.issue43_postgis_latest_ids(bbox_array)
+                params = {"limit": 1000}
+                if bbox_text is not None:
+                    params["bbox"] = bbox_text
+                result = self.call("GET", P + "/latest", 200, params=params)
+                actual = [[f["properties"]["vehicle_id"],
+                           f["properties"]["ping_id"]] for f in result["features"]]
+                self.assertEqual(result["count"], len(expected))
+                self.assertEqual(actual, expected)
+                if bbox_text is not None:
+                    self.assertNotIn([vehicle["vehicle_id"], older["ping_id"]], actual)
+                else:
+                    self.assertIn([vehicle["vehicle_id"], newest["ping_id"]], actual)
+
+    def test_94_latest_no_ping_vehicle_and_legacy_endpoints_unchanged(self):
+        no_ping_vehicle = self.issue43_new_vehicle()
+        vehicle = self.issue43_new_vehicle()
+        first = self.issue43_new_ping(vehicle["vehicle_id"], START, point(130, -40))
+        latest = self.issue43_new_ping(vehicle["vehicle_id"], END, point(132, -42))
+        result = self.call("GET", P + "/latest", 200, params={"limit": 1000})
+        self.assertIsNone(self.issue43_feature_by_vehicle(
+            result, no_ping_vehicle["vehicle_id"]
+        ))
+        self.assertEqual(
+            self.issue43_feature_by_vehicle(result, vehicle["vehicle_id"])
+            ["properties"]["ping_id"], latest["ping_id"]
+        )
+        legacy = self.call("GET", P, 200, params={
+            "vehicle_id": vehicle["vehicle_id"], "limit": 10,
+        })
+        self.assertEqual(legacy["count"], 2)
+        self.assertEqual({r["ping_id"] for r in legacy["items"]},
+                         {first["ping_id"], latest["ping_id"]})
+        history = self.call("GET", f"{V}/{vehicle['vehicle_id']}/pings", 200)
+        self.assertEqual(history["count"], 2)
+        self.assertEqual([r["ping_id"] for r in history["items"]],
+                         [first["ping_id"], latest["ping_id"]])
+        current = self.call("GET", f"{V}/{vehicle['vehicle_id']}/current-location", 200)
+        self.assertEqual(current["vehicle_id"], vehicle["vehicle_id"])
+        self.assertEqual(current["last_ts"], END)
+        self.assertEqual(current["last_geom"], point(132, -42))
+        self.assertIsNone(self.call(
+            "GET", f"{V}/{no_ping_vehicle['vehicle_id']}/current-location", 204
+        ))
 
     # -------------------------------------------------------
     # Final Road Segment database preservation
