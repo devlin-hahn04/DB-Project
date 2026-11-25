@@ -133,6 +133,73 @@ class LocationPingHandler:
 
         return {"items": items, "limit": parsed_limit, "offset": parsed_offset, "count": count}
 
+    def get_latest_vehicle_pings(
+        self,
+        limit,
+        offset,
+        bbox=None,
+    ):
+        """
+        Return the latest recorded GPS location for each vehicle.
+
+        Bbox filtering is applied by the DAO after selecting
+        the latest ping independently for every vehicle.
+        """
+
+        detail = LIST_QUERY_ERROR
+
+        # Reuse Phase II query validation.
+        parsed_limit = self._parse_nonnegative(
+            limit,
+            detail,
+        )
+
+        parsed_offset = self._parse_nonnegative(
+            offset,
+            detail,
+        )
+
+        parsed_bbox = (
+            self._parse_bbox(bbox, detail)
+            if bbox is not None
+            else None
+        )
+
+        try:
+            rows, count = self.dao.get_latest_vehicle_pings(
+                limit=parsed_limit,
+                offset=parsed_offset,
+                bbox=parsed_bbox,
+            )
+
+        except Exception as error:
+            raise self._internal_error(
+                "Fleet-wide latest vehicle pings retrieval failed",
+                error,
+            ) from error
+
+        features = []
+
+        for row in rows:
+            properties = dict(row)
+            geometry = properties.pop("geom")
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": geometry,
+                    "properties": properties,
+                }
+            )
+
+        return {
+            "type": "FeatureCollection",
+            "count": count,
+            "limit": parsed_limit,
+            "offset": parsed_offset,
+            "features": features,
+        }
+
     def get_ping_by_id(self, ping_id):
         try:
             result = self.dao.get_ping_by_id(ping_id)

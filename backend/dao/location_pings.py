@@ -191,6 +191,38 @@ class LocationPingDeleteResponse(BaseModel):
     ping_id: int
 
 
+class LatestVehiclePingProperties(BaseModel):
+    """Attributes for a vehicle's most recent GPS ping."""
+
+    vehicle_id: int
+    plate_number: str
+    ping_id: int
+    ts: datetime
+    speed_kph: float | None = None
+
+    @field_serializer("ts")
+    def serialize_ts(self, value: datetime) -> str:
+        return to_rfc3339(value)
+
+
+class LatestVehiclePingFeature(BaseModel):
+    """GeoJSON Point Feature for a vehicle's latest ping."""
+
+    type: Literal["Feature"] = "Feature"
+    geometry: PointGeometry
+    properties: LatestVehiclePingProperties
+
+
+class LatestVehiclePingFeatureCollection(BaseModel):
+    """Paginated fleet-wide latest-location response."""
+
+    type: Literal["FeatureCollection"] = "FeatureCollection"
+    count: int
+    limit: int
+    offset: int
+    features: list[LatestVehiclePingFeature]
+
+
 # ---------------------------------------------------------
 # Location ping DAO
 # ---------------------------------------------------------
@@ -285,6 +317,109 @@ class LocationPingDAO:
             limit, offset, "ping_id",
             vehicle_id=vehicle_id, from_ts=from_ts, to_ts=to_ts, bbox=bbox,
         )
+
+    def get_latest_vehicle_pings(
+        self,
+        limit: int,
+        offset: int,
+        bbox: tuple[float, float, float, float] | None = None,
+    ):
+        """
+        Retrieve the latest GPS ping independently for every vehicle.
+
+        Selection rules:
+        - One ping per vehicle.
+        - Most recent timestamp wins.
+        - Highest ping_id breaks timestamp ties.
+        - Apply bbox only AFTER identifying each vehicle's latest ping.
+        - Paginate the filtered results.
+        """
+
+        bbox_clause = ""
+        bbox_params = []
+
+        if bbox is not None:
+            bbox_clause = """
+                AND ST_Intersects(
+                    latest.geom,
+                    ST_MakeEnvelope(%s, %s, %s, %s, 4326)
+                )
+            """
+            bbox_params.extend(bbox)
+
+        # First identify each vehicle's most recent ping.
+        # Only then apply the optional spatial filter.
+        base_query = f"""
+            WITH latest AS (
+                SELECT DISTINCT ON (lp.vehicle_id)
+                    lp.vehicle_id,
+                    lp.ping_id,
+                    lp.ts,
+                    lp.speed_kph,
+                    lp.geom
+                FROM public.location_ping AS lp
+                ORDER BY
+                    lp.vehicle_id,
+                    lp.ts DESC,
+                    lp.ping_id DESC
+            ),
+            filtered AS (
+                SELECT
+                    latest.vehicle_id,
+                    v.plate_number,
+                    latest.ping_id,
+                    latest.ts,
+                    latest.speed_kph,
+                    latest.geom
+                FROM latest
+                JOIN public.vehicle AS v
+                    ON v.vehicle_id = latest.vehicle_id
+                WHERE TRUE
+                {bbox_clause}
+            )
+        """
+
+        data_query = base_query + """
+            SELECT
+                vehicle_id,
+                plate_number,
+                ping_id,
+                ts,
+                speed_kph,
+                ST_AsGeoJSON(geom)::json AS geom
+            FROM filtered
+            ORDER BY vehicle_id
+            LIMIT %s OFFSET %s
+        """
+
+        count_query = base_query + """
+            SELECT COUNT(*) AS total
+            FROM filtered
+        """
+
+        with get_db_connection() as conn:
+            with conn.cursor(
+                cursor_factory=RealDictCursor
+            ) as cursor:
+
+                cursor.execute(
+                    data_query,
+                    bbox_params + [limit, offset],
+                )
+
+                rows = [
+                    dict(row)
+                    for row in cursor.fetchall()
+                ]
+
+                cursor.execute(
+                    count_query,
+                    bbox_params,
+                )
+
+                count = cursor.fetchone()["total"]
+
+        return rows, count
 
     def get_pings_by_vehicle(self, vehicle_id, limit, offset, from_ts=None, to_ts=None):
         # Vehicle history reads as a timeline: oldest ping first.
