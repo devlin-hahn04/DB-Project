@@ -250,6 +250,43 @@ class TripDAO:
                 count = cursor.fetchone()["total"]
         return items, count
 
+
+    def get_trips_containing_ping_interval(self, vehicle_id, from_ts, to_ts):
+        """Return trips containing the complete GPS timestamp span in a selection.
+
+        The selected ping bounds are calculated from all matching GPS rows,
+        independently of API pagination. A trip is a candidate only when its
+        interval contains both the first and last selected ping timestamps.
+        """
+        query = """
+            WITH selected_ping_bounds AS (
+                SELECT
+                    MIN(ts) AS first_ping_ts,
+                    MAX(ts) AS last_ping_ts
+                FROM public.location_ping
+                WHERE vehicle_id = %s
+                  AND ts >= %s
+                  AND ts <= %s
+            )
+            SELECT t.trip_id
+            FROM public.trip AS t
+            CROSS JOIN selected_ping_bounds AS bounds
+            WHERE t.vehicle_id = %s
+              AND bounds.first_ping_ts IS NOT NULL
+              AND t.start_ts <= bounds.first_ping_ts
+              AND t.end_ts >= bounds.last_ping_ts
+            ORDER BY t.trip_id
+        """
+
+        with get_db_connection() as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+                cursor.execute(
+                    query,
+                    (vehicle_id, from_ts, to_ts, vehicle_id),
+                )
+                return [row["trip_id"] for row in cursor.fetchall()]
+
+
     def update_trip(self, trip_id, changes):
         allowed = {"vehicle_id", "start_ts", "end_ts", "start_geom", "end_geom", "distance_km"}
         if not changes or not set(changes).issubset(allowed):

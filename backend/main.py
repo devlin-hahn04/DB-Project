@@ -65,6 +65,7 @@ from backend.dao.location_pings import (
     LocationPingListResponse,
     LocationPingDeleteResponse,
     VehiclePingListResponse,
+    VehicleBreadcrumbResponse,
     LatestVehiclePingFeatureCollection,
 )
 from backend.dao.parking_areas import (
@@ -1124,6 +1125,43 @@ def get_vehicle_pings(
 ):
     validate_vehicle_id(vehicle_id)
     return ping_handler.get_pings_by_vehicle(vehicle_id, limit, offset, from_ts, to_ts)
+
+
+# ---------------------------------------------------------
+# GET /api/v1/vehicles/{vehicle_id}/breadcrumb
+# ---------------------------------------------------------
+
+@app.get(
+    "/api/v1/vehicles/{vehicle_id}/breadcrumb",
+    response_model=VehicleBreadcrumbResponse,
+    response_description="Vehicle breadcrumb returned successfully.",
+    responses={
+        400: {"description": "Invalid query parameters."},
+        404: {"description": "vehicle_id does not exist."},
+        409: {
+            "description": "Selected GPS history matches multiple trips."
+        },
+        500: {"description": "Internal server error."},
+    },
+    tags=["Location Pings"],
+)
+def get_vehicle_breadcrumb(
+    vehicle_id: int,
+    limit: str = pagination_query(100),
+    offset: str = pagination_query(0),
+    from_ts: str | None = None,
+    to_ts: str | None = None,
+):
+    """Return chronological vehicle GPS history and its associated trip ID."""
+    validate_vehicle_id(vehicle_id)
+
+    return ping_handler.get_vehicle_breadcrumb(
+        vehicle_id,
+        limit,
+        offset,
+        from_ts,
+        to_ts,
+    )
 
 
 # ---------------------------------------------------------

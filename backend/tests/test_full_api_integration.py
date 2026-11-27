@@ -148,6 +148,13 @@ EXPECTED = {
         "400": "Invalid query parameters.",
         "404": "vehicle_id does not exist.",
     },
+    ("/api/v1/vehicles/{vehicle_id}/breadcrumb", "get"): {
+        "200": "Vehicle breadcrumb returned successfully.",
+        "400": "Invalid query parameters.",
+        "404": "vehicle_id does not exist.",
+        "409": "Selected GPS history matches multiple trips.",
+        "500": "Internal server error.",
+    },
 }
 
 
@@ -262,6 +269,10 @@ PAGINATION_DEFAULTS = {
     ("/api/v1/location-pings/latest", "get"): {"limit": 100, "offset": 0},
     ("/api/v1/vehicles/{vehicle_id}/pings", "get"): {
         "limit": 20,
+        "offset": 0,
+    },
+    ("/api/v1/vehicles/{vehicle_id}/breadcrumb", "get"): {
+        "limit": 100,
         "offset": 0,
     },
     ("/api/v1/trips", "get"): {"limit": 20, "offset": 0},
@@ -582,7 +593,7 @@ class ProfessorGrader(unittest.TestCase):
     def test_01_openapi_exact_rubric(self):
         spec = self.call("GET", ROOT + "/openapi.json", 200)
 
-        self.assertEqual(sum(map(len, EXPECTED.values())), 112)
+        self.assertEqual(sum(map(len, EXPECTED.values())), 117)
 
         for (path, method), expected in EXPECTED.items():
             with self.subTest(path=path, method=method):
@@ -615,7 +626,7 @@ class ProfessorGrader(unittest.TestCase):
                     self.assertNotIn("maximum", schema)
                     pagination_parameter_count += 1
 
-        self.assertEqual(pagination_parameter_count, 24)
+        self.assertEqual(pagination_parameter_count, 26)
 
     def test_02_all_list_shapes_and_zero_limit(self):
         for url in (D, V, A, P, PA, T, RS):
@@ -4339,6 +4350,159 @@ finally:
         self.assertIsNone(self.call(
             "GET", f"{V}/{no_ping_vehicle['vehicle_id']}/current-location", 204
         ))
+
+    def test_95_vehicle_breadcrumb_history_trip_association_and_validation(self):
+        vehicle = self.new_vehicle()
+        vehicle_id = vehicle["vehicle_id"]
+
+        trip = self.new_trip(
+            vehicle_id,
+            "2032-05-20T12:00:00Z",
+            "2032-05-20T13:00:00Z",
+        )
+
+        # Insert records out of chronological order and add two records
+        # outside the selected interval.
+        self.new_ping(vehicle_id, "2032-05-20T11:59:59Z")
+        later = self.new_ping(vehicle_id, "2032-05-20T12:45:00Z")
+        earlier = self.new_ping(vehicle_id, "2032-05-20T12:15:00Z")
+        self.new_ping(vehicle_id, "2032-05-20T13:00:01Z")
+
+        url = f"{V}/{vehicle_id}/breadcrumb"
+        interval = {
+            "from_ts": "2032-05-20T12:00:00Z",
+            "to_ts": "2032-05-20T13:00:00Z",
+        }
+
+        result = self.call(
+            "GET",
+            url,
+            200,
+            params={**interval, "limit": 10, "offset": 0},
+        )
+
+        self.assertEqual(
+            set(result),
+            {"vehicle_id", "trip_id", "items", "limit", "offset", "count"},
+        )
+        self.assertEqual(result["vehicle_id"], vehicle_id)
+        self.assertEqual(result["trip_id"], trip["trip_id"])
+        self.assertEqual(result["count"], 2)
+        self.assertEqual(
+            [item["ping_id"] for item in result["items"]],
+            [earlier["ping_id"], later["ping_id"]],
+        )
+        self.assertEqual(
+            [item["ts"] for item in result["items"]],
+            ["2032-05-20T12:15:00Z", "2032-05-20T12:45:00Z"],
+        )
+        for item in result["items"]:
+            self.assertEqual(
+                set(item),
+                {"ping_id", "ts", "geom", "speed_kph", "heading_deg"},
+            )
+
+        # Pagination must not change the associated trip ID or total count.
+        page = self.call(
+            "GET",
+            url,
+            200,
+            params={**interval, "limit": 1, "offset": 1},
+        )
+        self.assertEqual(page["trip_id"], trip["trip_id"])
+        self.assertEqual(page["count"], 2)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertEqual(page["items"][0]["ping_id"], later["ping_id"])
+
+        # A zero-sized page still reports the total and trip association.
+        zero_page = self.call(
+            "GET",
+            url,
+            200,
+            params={**interval, "limit": 0},
+        )
+        self.assertEqual(zero_page["count"], 2)
+        self.assertEqual(zero_page["items"], [])
+        self.assertEqual(zero_page["trip_id"], trip["trip_id"])
+
+        # No GPS records means no breadcrumb and no associated trip.
+        empty = self.call(
+            "GET",
+            url,
+            200,
+            params={
+                "from_ts": "2032-05-21T12:00:00Z",
+                "to_ts": "2032-05-21T13:00:00Z",
+            },
+        )
+        self.assertEqual(empty["count"], 0)
+        self.assertEqual(empty["items"], [])
+        self.assertIsNone(empty["trip_id"])
+
+        # GPS history with no containing trip is still returned, with null ID.
+        unmatched_vehicle = self.new_vehicle()
+        self.new_ping(
+            unmatched_vehicle["vehicle_id"],
+            "2032-05-20T12:30:00Z",
+        )
+        unmatched = self.call(
+            "GET",
+            f"{V}/{unmatched_vehicle['vehicle_id']}/breadcrumb",
+            200,
+            params=interval,
+        )
+        self.assertEqual(unmatched["count"], 1)
+        self.assertIsNone(unmatched["trip_id"])
+
+        # If two trips both contain the selected GPS timestamp span, do not
+        # arbitrarily assign one of them.
+        ambiguous_vehicle = self.new_vehicle()
+        self.new_trip(
+            ambiguous_vehicle["vehicle_id"],
+            "2032-05-20T12:00:00Z",
+            "2032-05-20T13:00:00Z",
+        )
+        self.new_trip(
+            ambiguous_vehicle["vehicle_id"],
+            "2032-05-20T11:30:00Z",
+            "2032-05-20T13:30:00Z",
+        )
+        self.new_ping(
+            ambiguous_vehicle["vehicle_id"],
+            "2032-05-20T12:30:00Z",
+        )
+        self.call(
+            "GET",
+            f"{V}/{ambiguous_vehicle['vehicle_id']}/breadcrumb",
+            409,
+            params=interval,
+            detail="Selected GPS history matches multiple trips.",
+        )
+
+        # Required interval and timestamp validation.
+        self.call(
+            "GET", url, 400,
+            params={"to_ts": interval["to_ts"]},
+            detail="Invalid query parameters.",
+        )
+        self.call(
+            "GET", url, 400,
+            params={
+                "from_ts": interval["to_ts"],
+                "to_ts": interval["from_ts"],
+            },
+            detail="Invalid query parameters.",
+        )
+        self.call(
+            "GET", url, 400,
+            params={"from_ts": "not-a-timestamp", "to_ts": interval["to_ts"]},
+            detail="Invalid query parameters.",
+        )
+        self.call(
+            "GET", f"{V}/{MISSING}/breadcrumb", 404,
+            params=interval,
+            detail="vehicle_id does not exist.",
+        )
 
     # -------------------------------------------------------
     # Final Road Segment database preservation
