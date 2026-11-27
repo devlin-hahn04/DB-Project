@@ -185,6 +185,16 @@ class VehiclePingListResponse(BaseModel):
     offset: int
     count: int
 
+class VehicleBreadcrumbResponse(BaseModel):
+    """Vehicle GPS breadcrumb and its uniquely associated trip, if any."""
+
+    vehicle_id: int
+    trip_id: int | None = None
+    items: list[VehiclePingItem]
+    limit: int
+    offset: int
+    count: int
+
 
 class LocationPingDeleteResponse(BaseModel):
     message: str

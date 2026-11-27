@@ -9,6 +9,8 @@ from fastapi import HTTPException
 from psycopg2 import IntegrityError
 from psycopg2.errorcodes import FOREIGN_KEY_VIOLATION, NOT_NULL_VIOLATION
 
+from backend.dao.trips import TripDAO
+
 from backend.dao.location_pings import (
     LocationPingDAO,
     TIMESTAMP_PATTERN,
@@ -36,6 +38,7 @@ class LocationPingHandler:
 
     def __init__(self):
         self.dao = LocationPingDAO()
+        self.trip_dao = TripDAO()
 
     # ---------------------------------------------------------
     # Query parameter validation
@@ -255,6 +258,62 @@ class LocationPingHandler:
             "offset": parsed_offset,
             "count": count,
         }
+
+
+    def get_vehicle_breadcrumb(self, vehicle_id, limit, offset, from_ts=None, to_ts=None):
+        """Return a vehicle's GPS history and its unambiguous associated trip."""
+        detail = VEHICLE_PINGS_QUERY_ERROR
+
+        # A breadcrumb must always represent an explicitly selected interval.
+        if from_ts is None or to_ts is None:
+            raise self._bad_query(detail)
+
+        parsed_from, parsed_to = self._parse_time_range(
+            from_ts,
+            to_ts,
+            detail,
+        )
+
+        # Reuse the existing vehicle ping-history functionality.
+        history = self.get_pings_by_vehicle(
+            vehicle_id,
+            limit,
+            offset,
+            from_ts,
+            to_ts,
+        )
+
+        trip_id = None
+
+        # Resolve the trip using the complete selected GPS interval.
+        if history["count"] > 0:
+            try:
+                matching_trip_ids = self.trip_dao.get_trips_containing_ping_interval(
+                    vehicle_id,
+                    parsed_from,
+                    parsed_to,
+                )
+            except Exception as error:
+                raise self._internal_error(
+                    "Vehicle breadcrumb trip association failed",
+                    error,
+                ) from error
+
+            # Do not arbitrarily choose between multiple matching trips.
+            if len(matching_trip_ids) > 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Selected GPS history matches multiple trips.",
+                )
+
+            if matching_trip_ids:
+                trip_id = matching_trip_ids[0]
+
+        return {
+            **history,
+            "trip_id": trip_id,
+        }
+
 
     def update_ping(self, ping_id, changes):
         if not changes:
